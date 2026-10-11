@@ -1,6 +1,7 @@
 use std::str::FromStr;
 use std::time::Duration;
 
+use bytesize::ByteSize;
 use clap::{Args, ValueEnum};
 use csv::Writer;
 use evalexpr::eval_boolean;
@@ -57,6 +58,26 @@ impl From<&TestCaseStatus> for DisplayStatus {
             TestCaseStatus::FE => DisplayStatus::FE,
             TestCaseStatus::PC(p) => DisplayStatus::PC(*p),
         }
+    }
+}
+
+/// 结果里的内存显示：MLE 时子进程在越限瞬间被终止，采到的峰值只是下界，用 `>` 标出
+fn format_memory(status: &DisplayStatus, memory: Option<ByteSize>) -> String {
+    match memory {
+        Some(memory) if matches!(status, DisplayStatus::MLE) => format!("> {memory}"),
+        Some(memory) => format!("{memory}"),
+        None => "N/A".to_string(),
+    }
+}
+
+/// 结果里的用时显示：TLE 时子进程由我们终止，实测时刻只是下界，用 `>` 标出
+fn format_time(status: &DisplayStatus, time: Option<Duration>) -> String {
+    match time {
+        Some(time) if matches!(status, DisplayStatus::TLE) => {
+            format!("> {}", format_duration(time))
+        }
+        Some(time) => format_duration(time),
+        None => "N/A".to_string(),
     }
 }
 
@@ -453,14 +474,8 @@ pub fn test_problem(
                 status: display_status.clone(),
                 score: earned_score,
                 full_score,
-                time: match result.time {
-                    Some(duration) => format_duration(duration),
-                    None => "N/A".to_string(),
-                },
-                memory: match result.memory {
-                    Some(memory) => format!("{}", memory),
-                    None => "N/A".to_string(),
-                },
+                time: format_time(&display_status, result.time),
+                memory: format_memory(&display_status, result.memory),
                 message: result.message.clone(),
             });
 
@@ -469,32 +484,16 @@ pub fn test_problem(
                     status_str.clone().bold(),
                     "测试点 {}  | {} | {} | {}",
                     data_item.id().to_string().bold(),
-                    match result.time {
-                        Some(duration) => format_duration(duration),
-                        None => "N/A".to_string(),
-                    }
-                    .bold(),
-                    match result.memory {
-                        Some(memory) => format!("{}", memory),
-                        None => "N/A".to_string(),
-                    }
-                    .bold(),
+                    format_time(&display_status, result.time).bold(),
+                    format_memory(&display_status, result.memory).bold(),
                     info.bright_black()
                 ),
                 None => msg_item!(
                     status_str.clone().bold(),
                     "测试点 {}  | {} | {}",
                     data_item.id().to_string().bold(),
-                    match result.time {
-                        Some(duration) => format_duration(duration),
-                        None => "N/A".to_string(),
-                    }
-                    .bold(),
-                    match result.memory {
-                        Some(memory) => format!("{}", memory),
-                        None => "N/A".to_string(),
-                    }
-                    .bold()
+                    format_time(&display_status, result.time).bold(),
+                    format_memory(&display_status, result.memory).bold()
                 ),
             }
 

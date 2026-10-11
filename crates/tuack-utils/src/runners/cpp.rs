@@ -188,7 +188,7 @@ impl Runner for CppRunner {
         let stderr_file = std::fs::File::create(&stderr_path)?;
         cmd.stderr(Stdio::from(stderr_file));
 
-        let (status, time, memory) = ProcessSupervisor::new(limits).supervise_blocking(cmd)?;
+        let outcome = ProcessSupervisor::new(limits).supervise_blocking(cmd)?;
 
         let stderr = std::fs::read(stderr_path)?;
 
@@ -206,9 +206,9 @@ impl Runner for CppRunner {
         };
 
         Ok(RunResult {
-            status,
-            time,
-            memory,
+            status: outcome.status,
+            time: outcome.time,
+            memory: outcome.memory,
             output,
             stderr,
         })

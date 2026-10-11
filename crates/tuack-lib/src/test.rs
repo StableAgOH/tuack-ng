@@ -29,9 +29,9 @@ pub struct TestCaseResult {
     pub status: TestCaseStatus,
     /// 归一化得分，`AC=1.0`、`PC=p/100`、其余 `0.0`
     pub score: f64,
-    /// 实测运行时间；`TLE`/`MLE` 时无值
+    /// 实测运行时间；运行器内部错误或读取输入/答案失败时无值
     pub time: Option<Duration>,
-    /// 峰值内存；运行器内部错误或读取输入/答案失败时无值
+    /// 峰值内存；未采到读数、运行器内部错误或读取输入/答案失败时无值
     pub memory: Option<ByteSize>,
     /// 补充说明：校验器消息或失败原因
     pub message: Option<String>,

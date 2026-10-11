@@ -49,9 +49,9 @@ pub enum RunStatus {
 /// [`Runner::execute`] 的返回结果
 pub struct RunResult {
     pub status: RunStatus,
-    /// 运行时间，TLE/MLE 时为 `None`。
+    /// 运行时间；运行器内部错误时为 `None`。
     pub time: Option<Duration>,
-    /// 峰值内存（字节）；运行器内部错误时为 `None`。
+    /// 峰值内存（字节）；未采到读数或运行器内部错误时为 `None`。
     pub memory: Option<u64>,
     /// 程序输出流；`None` 表示输出文件不存在（文件 IO 程序未写输出）。
     pub output: Option<Box<dyn Reader>>,
