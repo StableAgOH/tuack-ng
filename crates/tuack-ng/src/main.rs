@@ -37,7 +37,12 @@ mod validate;
 
 #[derive(Debug, Parser)]
 #[clap_i18n]
-#[command(version, about = "Tuack-NG", disable_help_subcommand = true)]
+#[command(
+    version,
+    about = "Tuack-NG",
+    disable_help_subcommand = true,
+    after_help = exit_codes_help()
+)]
 struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -48,6 +53,17 @@ struct Cli {
     #[arg(long, global = true)]
     /// 静默模式，无视详细（仅调试构建）
     silent: bool,
+}
+
+/// 帮助末尾的退出码说明
+fn exit_codes_help() -> String {
+    format!(
+        "{}\n  {}  表示正常\n  {}  表示用户相关的问题\n  {}  程序自身的问题（Bug 或安装不完整）",
+        "退出码：".underline().bold(),
+        "0".bold(),
+        "1".bold(),
+        "2".bold(),
+    )
 }
 
 #[derive(Subcommand, Debug)]
@@ -132,7 +148,14 @@ fn report(error: &anyhow::Error) {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse_i18n_or_exit();
+    let cli = match Cli::parse_i18n() {
+        Ok(cli) => cli,
+        Err(error) => {
+            let _ = error.print();
+            // help/version 正常输出（0）；用法错误属于用户问题（1）
+            std::process::exit(if error.use_stderr() { 1 } else { 0 });
+        }
+    };
 
     let code = exit_code(tuack_ng(cli));
     if code != 0 {
