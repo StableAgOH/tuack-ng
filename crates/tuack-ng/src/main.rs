@@ -6,6 +6,8 @@
 //! 日志与 panic 策略随构建类型变化：调试构建下详细日志默认开启（`--silent` 关闭），
 //! panic 原样抛出；发布构建下详细日志默认关闭（`--verbose` 打开）。
 
+use std::process::ExitCode;
+
 use crate::conf::ConfArgs;
 use crate::dmk::DmkArgs;
 use crate::doc::DocArgs;
@@ -41,7 +43,7 @@ mod validate;
     version,
     about = "Tuack-NG",
     disable_help_subcommand = true,
-    after_help = exit_codes_help()
+    after_long_help = exit_codes_help()
 )]
 struct Cli {
     #[command(subcommand)]
@@ -121,23 +123,6 @@ fn tuack_ng(cli: Cli) -> Result<()> {
     }
 }
 
-/// 把子命令结果与错误统一落成退出码：正常 0、用户问题 1、自身问题 2。
-///
-/// 输出分工：用户问题（`Reported`）已由抛出它的代码输出，顶层不重复；其余错误都是未处理的
-/// 自身问题（Bug/安装，或某处用户问题忘了就地报告），由顶层输出并以 2 退出。
-fn exit_code(result: Result<()>) -> i32 {
-    match result {
-        Ok(()) => 0,
-        // 用户问题已在抛出点输出
-        Err(error) if is_reported(&error) => 1,
-        // 未报告的错误 = 未处理的自身问题
-        Err(error) => {
-            report(&error);
-            2
-        }
-    }
-}
-
 /// 输出未处理的自身问题
 fn report(error: &anyhow::Error) {
     if cfg!(debug_assertions) {
@@ -147,19 +132,28 @@ fn report(error: &anyhow::Error) {
     }
 }
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
     let cli = match Cli::parse_i18n() {
         Ok(cli) => cli,
         Err(error) => {
             let _ = error.print();
-            // help/version 正常输出（0）；用法错误属于用户问题（1）
-            std::process::exit(if error.use_stderr() { 1 } else { 0 });
+            // help/version 正常输出；用法错误属于用户问题（1）
+            return if error.use_stderr() {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            };
         }
     };
 
-    let code = exit_code(tuack_ng(cli));
-    if code != 0 {
-        std::process::exit(code);
+    match tuack_ng(cli) {
+        Ok(()) => ExitCode::SUCCESS,
+        // 用户问题已在抛出点输出
+        Err(error) if is_reported(&error) => ExitCode::from(1),
+        // 未报告的错误 = 未处理的自身问题
+        Err(error) => {
+            report(&error);
+            ExitCode::from(2)
+        }
     }
-    Ok(())
 }
