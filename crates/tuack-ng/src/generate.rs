@@ -115,7 +115,7 @@ fn gen_day(args: GenStatementArgs) -> Result<()> {
 
     // 检查当前目录是否存在 contest 配置文件
     if !config_path.exists() {
-        bail!("day 命令必须在 contest 目录下执行");
+        user_bail!("day 命令必须在 contest 目录下执行");
     }
 
     // 检查配置文件是否为 contest 类型
@@ -124,10 +124,10 @@ fn gen_day(args: GenStatementArgs) -> Result<()> {
 
     if let Some(folder) = json_value.get("folder").and_then(|v| v.as_str()) {
         if folder != "contest" {
-            bail!("day 命令必须在 contest 目录下执行");
+            user_bail!("day 命令必须在 contest 目录下执行");
         }
     } else {
-        bail!("无效的配置文件");
+        user_bail!("无效的配置文件");
     }
 
     // 查找 scaffold/day 目录（资源目录列表中第一个存在的）
@@ -174,7 +174,7 @@ fn gen_problem(args: GenStatementArgs) -> Result<()> {
 
     // 检查当前目录是否存在 day 配置文件
     if !config_path.exists() {
-        bail!("problem 命令必须在 day 目录下执行");
+        user_bail!("problem 命令必须在 day 目录下执行");
     }
 
     // 检查配置文件是否为 day 类型
@@ -183,10 +183,10 @@ fn gen_problem(args: GenStatementArgs) -> Result<()> {
 
     if let Some(folder) = json_value.get("folder").and_then(|v| v.as_str()) {
         if folder != "day" {
-            bail!("problem 命令必须在 day 目录下执行");
+            user_bail!("problem 命令必须在 day 目录下执行");
         }
     } else {
-        bail!("无效的配置文件");
+        user_bail!("无效的配置文件");
     }
 
     // 查找 scaffold/problem 目录（资源目录列表中第一个存在的）
@@ -227,15 +227,16 @@ fn gen_lfs() -> Result<()> {
     let attributes_path = find_in_scaffold("problem.gitattributes", false)?;
 
     // 统一获取配置，避免重复调用
-    let config = &gctx().config.as_ref().context("没有有效的配置文件")?.config;
+    let Some(config) = gctx().config.as_ref() else {
+        user_bail!("没有有效的配置文件");
+    };
+    let config = &config.config;
 
     // 根据当前位置获取需要处理的问题列表
-    let problems_to_process = match gctx()
-        .config
-        .as_ref()
-        .context("没有有效的配置文件")?
-        .location
-    {
+    let Some(loaded) = gctx().config.as_ref() else {
+        user_bail!("没有有效的配置文件");
+    };
+    let problems_to_process = match loaded.location {
         CurrentLocation::Root => {
             // 获取所有问题
             config
@@ -255,7 +256,7 @@ fn gen_lfs() -> Result<()> {
             .and_then(|day| day.subconfig.get(problem_name))
             .map(|problem| vec![problem])
             .context(format!("找不到问题 '{}/{}'", day_name, problem_name))?,
-        CurrentLocation::None => bail!("没有有效的配置文件"),
+        CurrentLocation::None => user_bail!("没有有效的配置文件"),
     };
 
     for problem in problems_to_process {
@@ -300,7 +301,9 @@ fn gen_data(args: GenConfirmArgs) -> Result<()> {
         return Ok(());
     }
 
-    let config = gctx().config.clone().context("没有有效的配置")?;
+    let Some(config) = gctx().config.clone() else {
+        user_bail!("没有有效的配置");
+    };
     for (now_day_name, day) in config.config.subconfig {
         let day_name: Option<String> = match config.location {
             CurrentLocation::Day(ref name) => Some(name.clone()),
@@ -387,7 +390,9 @@ fn gen_sample(args: GenConfirmArgs) -> Result<()> {
         return Ok(());
     }
 
-    let config = gctx().config.clone().context("没有有效的配置")?;
+    let Some(config) = gctx().config.clone() else {
+        user_bail!("没有有效的配置");
+    };
     for (now_day_name, day) in config.config.subconfig {
         let day_name: Option<String> = match config.location {
             CurrentLocation::Day(ref name) => Some(name.clone()),
@@ -488,7 +493,9 @@ fn gen_code(args: GenConfirmArgs) -> Result<()> {
         return Ok(());
     }
 
-    let config = gctx().config.clone().context("没有有效的配置")?;
+    let Some(config) = gctx().config.clone() else {
+        user_bail!("没有有效的配置");
+    };
     for (now_day_name, day) in config.config.subconfig {
         let day_name: Option<String> = match config.location {
             CurrentLocation::Day(ref name) => Some(name.clone()),
@@ -581,7 +588,7 @@ fn gen_complete(args: GenCompleteArgs) -> Result<()> {
         "fish" => Shell::Fish,
         _ => {
             error!("不支持的 shell 类型：{}", args.name);
-            bail!("不支持的 shell 类型")
+            user_bail!("不支持的 shell 类型")
         }
     };
     let mut cmd = crate::Cli::command_i18n();

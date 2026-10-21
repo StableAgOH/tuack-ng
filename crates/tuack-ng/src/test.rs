@@ -201,7 +201,7 @@ pub fn test_problem(
     problem_config: &ProblemConfig,
     target: Target,
     in_problem: bool,
-) -> Result<()> {
+) -> Result<bool> {
     let data_items: Vec<FsTestData<'_>> = match target {
         Target::Data => tuack_utils::data::problem_test_data(problem_config),
         Target::Sample => tuack_utils::data::problem_sample_data(problem_config),
@@ -221,8 +221,7 @@ pub fn test_problem(
             let source_path = resolve(&chk_config.source);
 
             if !source_path.exists() {
-                msg_warn!("题目 {} 的 Checker 不存在", problem_config.name.magenta());
-                return Ok(());
+                user_bail!("题目 {} 的 Checker 不存在", problem_config.name.magenta());
             }
 
             let mut deps: IndexMap<String, Vec<u8>> = IndexMap::new();
@@ -231,12 +230,11 @@ pub fn test_problem(
                 let content = match fs::read(&abs) {
                     Ok(c) => c,
                     Err(e) => {
-                        msg_warn!(
+                        user_bail!(
                             "题目 {} 的 Checker 依赖读取失败：{}",
                             problem_config.name.magenta(),
                             e
                         );
-                        return Ok(());
                     }
                 };
                 let name = abs.file_name().unwrap().to_string_lossy().to_string();
@@ -251,20 +249,21 @@ pub fn test_problem(
             {
                 Ok(c) => c,
                 Err(e) => {
-                    msg_warn!(
+                    user_bail!(
                         "题目 {} 的 Checker 初始化失败：{}",
                         problem_config.name.magenta(),
                         e
                     );
-                    return Ok(());
                 }
             };
 
             if let Err(e) = cpp_checker.prepare() {
-                msg_warn!("题目 {} 的 Checker 编译失败", problem_config.name.magenta());
-                msg_warn!("{}", e);
                 compile_pb.finish_and_clear();
-                return Ok(());
+                user_bail!(
+                    "题目 {} 的 Checker 编译失败：{}",
+                    problem_config.name.magenta(),
+                    e
+                );
             }
 
             compile_pb.finish_and_clear();
@@ -280,7 +279,7 @@ pub fn test_problem(
                         .join(format!("normal{}", std::env::consts::EXE_SUFFIX));
                     p.exists().then_some(p)
                 })
-                .context("Checker 文件不存在")?;
+                .context("内置 Checker 缺失（安装不完整）")?;
             Box::new(PrebuiltChecker::new(default_binary)) as Box<dyn Checker>
         }
     };
@@ -304,6 +303,7 @@ pub fn test_problem(
     );
 
     let mut tester_count = 0;
+    let mut unmet = false;
     for (test_name, test) in &problem_config.tests {
         tester_count += 1;
         tester_pb.set_message(format!(
@@ -370,15 +370,15 @@ pub fn test_problem(
                 let header_path = resolve_path(&interactive.header)?;
 
                 if !grader_path.exists() {
-                    bail!("grader 不存在")
+                    user_bail!("grader 不存在")
                 }
                 if !header_path.exists() {
-                    bail!("header 不存在")
+                    user_bail!("header 不存在")
                 }
 
                 runner.set_interactive(&grader_path, &header_path)?;
             } else {
-                bail!("该语言不支持交互")
+                user_bail!("该语言不支持交互")
             }
         }
 
@@ -564,6 +564,7 @@ pub fn test_problem(
             } else {
                 info!("测试 {} 不满足所有条件", test_name);
                 msg_warn!("{}", "不满足所有条件".bold());
+                unmet = true;
             }
         }
 
@@ -583,10 +584,10 @@ pub fn test_problem(
     });
     write_results_to_csv(all_test_results, &csv_path)?;
 
-    Ok(())
+    Ok(unmet)
 }
 
-fn test_day(day_config: &ContestDayConfig, target: Target, in_day: bool) -> Result<()> {
+fn test_day(day_config: &ContestDayConfig, target: Target, in_day: bool) -> Result<bool> {
     let total_problems = day_config.subconfig.len();
     let day_pb = gctx()
         .multiprogress
@@ -597,9 +598,10 @@ fn test_day(day_config: &ContestDayConfig, target: Target, in_day: bool) -> Resu
             .unwrap()
             .progress_chars("=> "),
     );
+    let mut unmet = false;
     for (idx, (_, problem_config)) in day_config.subconfig.iter().enumerate() {
         day_pb.set_message(format!("处理第 {}/{} 题", idx + 1, total_problems));
-        test_problem(day_config, problem_config, target, false)?;
+        unmet |= test_problem(day_config, problem_config, target, false)?;
         day_pb.inc(1);
     }
     if in_day {
@@ -607,15 +609,19 @@ fn test_day(day_config: &ContestDayConfig, target: Target, in_day: bool) -> Resu
     } else {
         day_pb.finish_and_clear();
     }
-    Ok(())
+    Ok(unmet)
 }
 
 pub fn main(args: TestArgs) -> Result<()> {
     let Config {
         config,
         location: current_location,
-    } = gctx().config.as_ref().context("找不到配置文件")?;
+    } = gctx()
+        .config
+        .as_ref()
+        .ok_or_else(|| user_error!("找不到配置文件"))?;
 
+    let mut unmet = false;
     match current_location {
         CurrentLocation::Problem(day_key, prob_key) => {
             let day_config = config
@@ -626,14 +632,14 @@ pub fn main(args: TestArgs) -> Result<()> {
                 .subconfig
                 .get(prob_key)
                 .with_context(|| format!("未找到题目配置：{}", prob_key))?;
-            test_problem(day_config, problem_config, args.target, true)?;
+            unmet |= test_problem(day_config, problem_config, args.target, true)?;
         }
         CurrentLocation::Day(day_key) => {
             let day_config = config
                 .subconfig
                 .get(day_key)
                 .with_context(|| format!("未找到天配置：{}", day_key))?;
-            test_day(day_config, args.target, true)?;
+            unmet |= test_day(day_config, args.target, true)?;
         }
         CurrentLocation::Root => {
             let total_days = config.subconfig.len();
@@ -648,13 +654,16 @@ pub fn main(args: TestArgs) -> Result<()> {
             );
             for (day_idx, (_, day_config)) in config.subconfig.iter().enumerate() {
                 day_pb.set_message(format!("处理第 {}/{} 天", day_idx + 1, total_days));
-                test_day(day_config, args.target, false)?;
+                unmet |= test_day(day_config, args.target, false)?;
                 day_pb.inc(1);
             }
             day_pb.finish_with_message("测试完成！");
         }
-        CurrentLocation::None => bail!("此命令必须在工程下执行"),
+        CurrentLocation::None => user_bail!("此命令必须在工程下执行"),
     }
 
+    if unmet {
+        user_bail!();
+    }
     Ok(())
 }

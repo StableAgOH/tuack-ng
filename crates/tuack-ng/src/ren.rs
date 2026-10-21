@@ -75,7 +75,7 @@ fn build_ren_config(
             .languages
             .get(lang_key)
             .map(|lang| lang.language.clone())
-            .ok_or_else(|| anyhow!("在语言配置中未找到 {}", lang_key))?;
+            .ok_or_else(|| user_error!("在语言配置中未找到 {}", lang_key))?;
         support_languages.push(SupportLanguage {
             name: language_name,
             compile_options: compile_options.clone(),
@@ -83,7 +83,7 @@ fn build_ren_config(
     }
 
     if day_config.name.is_empty() {
-        bail!("比赛日 name 不能为空");
+        user_bail!("比赛日 name 不能为空");
     }
 
     Ok(RenConfig {
@@ -150,7 +150,7 @@ fn build_render_document(
         let problem_dir = &problem_config.path;
         let statement_path = problem_dir.join("statement.md");
         if !statement_path.exists() {
-            bail!("未找到题面文件：{}", statement_path.display());
+            user_bail!("未找到题面文件：{}", statement_path.display());
         }
 
         // 先移除 HTML 注释，再展开模板
@@ -215,11 +215,11 @@ fn build_render_document(
     // 处理注意事项文件
     let precaution_path = config.path.join("precaution.md");
     if !precaution_path.exists() {
-        bail!("未找到注意事项文件：{}", precaution_path.display());
+        user_bail!("未找到注意事项文件：{}", precaution_path.display());
     }
     let precaution_ast = parse(&fs::read_to_string(&precaution_path)?);
     if !ImageCollector::collect(&precaution_ast).is_empty() {
-        bail!("注意事项不支持图片");
+        user_bail!("注意事项不支持图片");
     }
     info!("处理注意事项文件：{}", precaution_path.display());
 
@@ -303,11 +303,11 @@ fn ren(
     let (target, files) = match render_result {
         Ok(result) => result,
         Err(e) => {
-            msg_error!("渲染失败:\n{:?}", e);
+            msg_error!("渲染失败：{:?}", e);
             msg_info!("保留临时目录以供调试：{}", tmp_dir.display());
             // Arc<TempDir> 无 keep()；泄漏一个引用阻止 drop，从而保留目录
             std::mem::forget(tmp.clone());
-            bail!("渲染过程出错");
+            user_bail!();
         }
     };
 
@@ -318,7 +318,7 @@ fn ren(
         msg_info!("保留临时目录以供调试：{}", tmp_dir.display());
         // 同上
         std::mem::forget(tmp.clone());
-        bail!("写入渲染结果失败");
+        user_bail!();
     }
     msg_info!("结果已保存到：{}", main_artifact.display());
 
@@ -355,7 +355,10 @@ pub fn main(args: RenArgs) -> Result<()> {
     let Config {
         config,
         location: current_location,
-    } = gctx().config.as_ref().context("找不到配置文件")?;
+    } = gctx()
+        .config
+        .as_ref()
+        .ok_or_else(|| user_error!("找不到配置文件"))?;
 
     let statements_dir = match current_location {
         CurrentLocation::Problem(day_name, problem_name) => Path::new(&config.path)
@@ -373,7 +376,7 @@ pub fn main(args: RenArgs) -> Result<()> {
     }
 
     if !gctx().plugins.template_exists(target) {
-        bail!("没有找到模板 {}", target);
+        user_bail!("没有找到模板 {}", target);
     }
 
     let statements_dir = statements_dir.join(target);
@@ -394,18 +397,23 @@ pub fn main(args: RenArgs) -> Result<()> {
                     .unwrap()
                     .progress_chars("=> "),
             );
-            let mut failed_days = Vec::new();
+            let mut failed = false;
             for (day_count, (day_name, day_config)) in config.subconfig.iter().enumerate() {
                 day_pb.set_message(format!("处理第 {}/{} 天", day_count, total_days));
-                if let Err(e) = ren(config, day_config, None, &statements_dir, &args) {
-                    msg_error!("第 {} 天渲染失败：{:?}", day_name, e);
-                    failed_days.push(day_name.clone());
+                match ren(config, day_config, None, &statements_dir, &args) {
+                    Ok(()) => {}
+                    // 用户问题已在失败点输出，继续处理其余天
+                    Err(e) if is_reported(&e) => failed = true,
+                    // 未报告的错误 = 未处理的自身问题：立即中止
+                    Err(e) => {
+                        return Err(e).context(format!("第 {} 天渲染失败", day_name));
+                    }
                 }
                 day_pb.inc(1);
             }
             day_pb.finish_with_message("渲染完成！");
-            if !failed_days.is_empty() {
-                bail!("以下天渲染失败：{}", failed_days.join(", "));
+            if failed {
+                user_bail!();
             }
         }
         CurrentLocation::Day(day) => {
@@ -426,7 +434,7 @@ pub fn main(args: RenArgs) -> Result<()> {
                 &args,
             )?;
         }
-        CurrentLocation::None => bail!("没有有效的配置文件"),
+        CurrentLocation::None => user_bail!("没有有效的配置文件"),
     }
     Ok(())
 }

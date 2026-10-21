@@ -1,7 +1,10 @@
 //! Tuack-NG 命令行入口：定义子命令并分发到各模块。
 //!
-//! 日志与 panic 策略随构建类型变化：调试构建下详细日志默认开启（`--silent` 关闭），panic
-//! 原样抛出；发布构建下详细日志默认关闭（`--verbose` 打开），顶层错误输出后以状态码 1 退出。
+//! 退出码约定：运行正常为 0；遇到了用户有关的问题（相关问题已在函数内输出）为 1；
+//! 遇到了程序自身的问题为 2，错误由顶层输出。
+//!
+//! 日志与 panic 策略随构建类型变化：调试构建下详细日志默认开启（`--silent` 关闭），
+//! panic 原样抛出；发布构建下详细日志默认关闭（`--verbose` 打开）。
 
 use crate::conf::ConfArgs;
 use crate::dmk::DmkArgs;
@@ -22,6 +25,7 @@ mod develop;
 mod dmk;
 mod doc;
 mod dump;
+mod errors;
 mod generate;
 mod init;
 mod plugin;
@@ -101,16 +105,38 @@ fn tuack_ng(cli: Cli) -> Result<()> {
     }
 }
 
+/// 把子命令结果与错误统一落成退出码：正常 0、用户问题 1、自身问题 2。
+///
+/// 输出分工：用户问题（`Reported`）已由抛出它的代码输出，顶层不重复；其余错误都是未处理的
+/// 自身问题（Bug/安装，或某处用户问题忘了就地报告），由顶层输出并以 2 退出。
+fn exit_code(result: Result<()>) -> i32 {
+    match result {
+        Ok(()) => 0,
+        // 用户问题已在抛出点输出
+        Err(error) if is_reported(&error) => 1,
+        // 未报告的错误 = 未处理的自身问题
+        Err(error) => {
+            report(&error);
+            2
+        }
+    }
+}
+
+/// 输出未处理的自身问题
+fn report(error: &anyhow::Error) {
+    if cfg!(debug_assertions) {
+        msg_error!("程序执行出错：{:?}", error);
+    } else {
+        msg_error!("程序执行出错：{:#}", error);
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse_i18n_or_exit();
 
-    let result = tuack_ng(cli);
-
-    if cfg!(debug_assertions) {
-        result?;
-    } else if let Err(e) = result {
-        msg_error!("程序执行出错：{:#}", e);
-        std::process::exit(1);
+    let code = exit_code(tuack_ng(cli));
+    if code != 0 {
+        std::process::exit(code);
     }
     Ok(())
 }

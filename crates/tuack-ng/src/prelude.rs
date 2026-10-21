@@ -4,6 +4,9 @@ pub use anyhow::{Context, Result, anyhow, bail};
 pub use log::{debug, error, info, trace, warn};
 
 pub use crate::context::gctx;
+pub use crate::errors::{Reported, is_reported};
+pub use crate::user_bail;
+pub use crate::user_error;
 pub use crate::utils::message::*;
 pub use tuack_config::{
     Config, ContestConfig, ContestDayConfig, CurrentLocation, DataItem, DmkConfig, ExpectedScore,

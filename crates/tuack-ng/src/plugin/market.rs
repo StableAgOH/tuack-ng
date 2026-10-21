@@ -177,7 +177,7 @@ fn market_install(name: &str, force: bool) -> Result<()> {
 
     let dest = gctx().plugins.plugins_dir().join(name);
     if dest.exists() && !force {
-        bail!("插件目录已存在：{}（加 `--force` 覆盖）", dest.display());
+        user_bail!("插件目录已存在：{}（加 `--force` 覆盖）", dest.display());
     }
 
     install_plugin(plugin, &dest)?;
@@ -196,7 +196,7 @@ fn market_install(name: &str, force: bool) -> Result<()> {
 /// 更新已安装插件：指定单个插件名，或 `--all` 更新全部。更新后取消信任。
 fn market_update(name: Option<String>, all: bool, force: bool) -> Result<()> {
     if all == name.is_some() {
-        bail!("请指定插件名，或用 `--all` 更新全部");
+        user_bail!("请指定插件名，或用 `--all` 更新全部");
     }
     let index = fetch_market()?;
 
@@ -218,7 +218,7 @@ fn market_update(name: Option<String>, all: bool, force: bool) -> Result<()> {
     } else {
         let plugin_name = name.as_deref().expect("已校验 name 存在");
         if !installed.iter().any(|n| n == plugin_name) {
-            bail!("插件未安装，无法更新：{}", plugin_name);
+            user_bail!("插件未安装，无法更新：{}", plugin_name);
         }
         match index.plugins.iter().find(|p| p.name == plugin_name) {
             Some(plugin) => targets.push(plugin),
@@ -234,15 +234,15 @@ fn market_update(name: Option<String>, all: bool, force: bool) -> Result<()> {
         return Ok(());
     }
 
-    let mut failed: Vec<String> = Vec::new();
+    let mut failed = false;
     for plugin in targets {
         if let Err(e) = market_update_one(plugin, force) {
             msg_error!("插件 {} 更新失败：{:?}", plugin.name, e);
-            failed.push(plugin.name.clone());
+            failed = true;
         }
     }
-    if !failed.is_empty() {
-        bail!("以下插件更新失败：{}", failed.join(", "));
+    if failed {
+        user_bail!();
     }
     Ok(())
 }

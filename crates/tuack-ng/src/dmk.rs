@@ -223,7 +223,7 @@ fn find_std(problem: &ProblemConfig) -> Result<PathBuf> {
         }
     }
 
-    bail!("未找到标程文件")
+    user_bail!("未找到标程文件")
 }
 
 /// 构造标程运行器 [`Runner`]
@@ -270,10 +270,10 @@ fn build_std_runner(
         let header_path = resolve_path(&interactive.header)?;
 
         if !grader_path.exists() {
-            bail!("grader 不存在")
+            user_bail!("grader 不存在")
         }
         if !header_path.exists() {
-            bail!("header 不存在")
+            user_bail!("header 不存在")
         }
 
         runner.set_interactive(&grader_path, &header_path)?;
@@ -283,7 +283,9 @@ fn build_std_runner(
 }
 
 pub fn main(args: DmkArgs) -> Result<()> {
-    let config = gctx().config.as_ref().context("没有找到有效的工程")?;
+    let Some(config) = gctx().config.as_ref() else {
+        user_bail!("没有找到有效的工程");
+    };
 
     let (current_problem, current_day) =
         if let CurrentLocation::Problem(ref day, ref prog) = config.location {
@@ -300,7 +302,7 @@ pub fn main(args: DmkArgs) -> Result<()> {
 
             (problem_config, day_config)
         } else {
-            bail!("本命令只能在题目目录下执行");
+            user_bail!("本命令只能在题目目录下执行");
         };
 
     let selected: Vec<FsTestData> = match &args.target {
@@ -309,18 +311,22 @@ pub fn main(args: DmkArgs) -> Result<()> {
     };
     let selected = parse_test_object(&args.object, &selected, FsTestData::id)?;
 
+    if selected.is_empty() {
+        user_bail!("没有需要生成的数据");
+    }
+
     let generator_config = match &args.target {
         Target::Data => current_problem
             .generator
             .as_ref()
-            .context("generator 未配置")?
+            .ok_or_else(|| user_error!("generator 未配置"))?
             .data
             .clone(),
         Target::Sample => {
             let pair = current_problem
                 .generator
                 .as_ref()
-                .context("generator 未配置")?;
+                .ok_or_else(|| user_error!("generator 未配置"))?;
             pair.sample.clone().unwrap_or(pair.data.clone())
         }
     };
@@ -354,8 +360,9 @@ pub fn main(args: DmkArgs) -> Result<()> {
     let effective_validate = args.validate.unwrap_or(generator_config.validate);
     let validator: Option<Box<dyn Validator>> = if effective_validate {
         Some(
-            compile_validator(current_problem, args.target.into())
-                .with_context(|| format!("题目 {} 的 Validator 不可用", current_problem.name))?,
+            compile_validator(current_problem, args.target.into()).map_err(|e| {
+                user_error!("题目 {} 的 Validator 不可用：{:#}", current_problem.name, e)
+            })?,
         )
     } else {
         None
@@ -377,11 +384,6 @@ pub fn main(args: DmkArgs) -> Result<()> {
         &selected,
         matches!(args.action, DmkCommand::Reset),
     )?;
-
-    if selected.is_empty() {
-        msg_warn!("没有需要生成的数据");
-        return Ok(());
-    }
 
     // 标程：查找 -> 构造 -> 交互配置 -> 编译
     let std_path = find_std(current_problem)?;
@@ -412,6 +414,7 @@ pub fn main(args: DmkArgs) -> Result<()> {
             .progress_chars("=> "),
     );
 
+    let mut failed = false;
     for item in &selected {
         dmk_pb.set_message(format!(
             "{}/{} | 正在生成数据点 #{}",
@@ -425,10 +428,12 @@ pub fn main(args: DmkArgs) -> Result<()> {
         report_status(item.id(), "输入", &status);
 
         if matches!(status, DmkResult::Fail(_)) {
+            failed = true;
             report_status(item.id(), "输出", &DmkResult::Skip);
         } else {
             let status = gen_output(&mut session, item, args.action)?;
             report_status(item.id(), "输出", &status);
+            failed |= matches!(status, DmkResult::Fail(_));
         }
 
         dmk_pb.inc(1);
@@ -438,5 +443,8 @@ pub fn main(args: DmkArgs) -> Result<()> {
 
     save_seed(&target_dir, &seeds)?;
 
+    if failed {
+        user_bail!();
+    }
     Ok(())
 }

@@ -98,7 +98,7 @@ fn explain(id: String) -> Result<()> {
         }
     }
 
-    bail!("找不到规则 {}", id);
+    user_bail!("找不到规则 {}", id);
 }
 
 pub fn main(args: FormatArgs) -> Result<()> {
@@ -107,10 +107,12 @@ pub fn main(args: FormatArgs) -> Result<()> {
         return Ok(());
     }
 
-    let config = gctx().config.as_ref().context("没有可用的工程")?;
+    let Some(config) = gctx().config.as_ref() else {
+        user_bail!("没有可用的工程");
+    };
 
     match &config.location {
-        CurrentLocation::None => bail!("没有可用的工程"),
+        CurrentLocation::None => user_bail!("没有可用的工程"),
         CurrentLocation::Root => {
             for (_, day_config) in &config.config.subconfig {
                 format_day(day_config)?;

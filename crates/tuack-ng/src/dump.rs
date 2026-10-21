@@ -169,11 +169,11 @@ fn dump_main(
     let (files, warnings) = match dumper.dump(&doc, Box::new(assets)) {
         Ok(result) => result,
         Err(e) => {
-            msg_error!("导出失败:\n{:?}", e);
+            msg_error!("导出失败：{:?}", e);
             msg_info!("保留临时目录以供调试：{}", tmp.path().display());
             // 故意泄漏临时目录，使其不被自动清理，便于事后调试
             std::mem::forget(tmp.clone());
-            bail!("导出过程出错");
+            user_bail!();
         }
     };
 
@@ -192,7 +192,7 @@ fn dump_main(
         msg_info!("保留临时目录以供调试：{}", tmp.path().display());
         // 故意泄漏临时目录，使其不被自动清理，便于事后调试
         std::mem::forget(tmp.clone());
-        bail!("写入导出结果失败");
+        user_bail!();
     }
     msg_info!("导出完成，输出目录：{}", out_dir.display());
 
@@ -209,12 +209,12 @@ pub fn main(args: DumpArgs) -> Result<()> {
     }
     let target = args.target.as_deref().expect("clap 保证存在 target");
     if gctx().config.is_none() {
-        bail!("没有有效的配置文件");
+        user_bail!("没有有效的配置文件");
     }
     let config = gctx().config.clone().unwrap();
     match config.location {
-        CurrentLocation::None => bail!("此命令必须在工程下执行"),
-        CurrentLocation::Problem(_, _) => bail!("此命令不能在题目下执行"),
+        CurrentLocation::None => user_bail!("此命令必须在工程下执行"),
+        CurrentLocation::Problem(_, _) => user_bail!("此命令不能在题目下执行"),
         CurrentLocation::Day(day) => {
             dump_main(
                 &config.config,
@@ -224,8 +224,20 @@ pub fn main(args: DumpArgs) -> Result<()> {
             )?;
         }
         CurrentLocation::Root => {
+            let mut failed = false;
             for (idx, (_, day_config)) in config.config.subconfig.iter().enumerate() {
-                dump_main(&config.config, day_config, idx + 1, target)?;
+                match dump_main(&config.config, day_config, idx + 1, target) {
+                    Ok(()) => {}
+                    // 用户问题已在失败点输出，继续处理其余天
+                    Err(e) if is_reported(&e) => failed = true,
+                    // 未报告的错误 = 未处理的自身问题：立即中止
+                    Err(e) => {
+                        return Err(e).context(format!("第 {} 天导出失败", day_config.name));
+                    }
+                }
+            }
+            if failed {
+                user_bail!();
             }
         }
     }

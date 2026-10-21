@@ -44,14 +44,14 @@ pub fn compile_validator(
                 &pair.data
             }
         }
-        None => bail!("Validator 未配置"),
+        None => user_bail!("Validator 未配置"),
     };
 
     let resolve = |path: &str| problem_config.path.join(path);
     let source_path = resolve(&val_config.source);
 
     if !source_path.exists() {
-        bail!("Validator 不存在：{}", source_path.display());
+        user_bail!("Validator 不存在：{}", source_path.display());
     }
 
     let mut deps: IndexMap<String, Vec<u8>> = IndexMap::new();
@@ -78,12 +78,13 @@ pub fn compile_validator(
     result
 }
 
+/// 校验单个题目，返回是否有输入未通过校验
 fn validate_problem(
     problem_config: &ProblemConfig,
     target: Target,
     object: &str,
     in_problem: bool,
-) -> Result<()> {
+) -> Result<bool> {
     let data_items: Vec<FsTestData<'_>> = match target {
         Target::Data => tuack_utils::data::problem_test_data(problem_config),
         Target::Sample => tuack_utils::data::problem_sample_data(problem_config),
@@ -93,14 +94,11 @@ fn validate_problem(
 
     let validator = match compile_validator(problem_config, target) {
         Ok(v) => v,
-        Err(e) => {
-            msg_error!(
-                "题目 {} 的 Validator 不可用：{:#}",
-                problem_config.name.magenta(),
-                e
-            );
-            return Ok(());
-        }
+        Err(e) => user_bail!(
+            "题目 {} 的 Validator 不可用：{:#}",
+            problem_config.name.magenta(),
+            e
+        ),
     };
 
     let case_pb = gctx()
@@ -178,15 +176,16 @@ fn validate_problem(
         );
     }
 
-    Ok(())
+    Ok(failed > 0)
 }
 
+/// 校验一天，返回是否有题目未通过校验
 fn validate_day(
     day_config: &ContestDayConfig,
     target: Target,
     object: &str,
     in_day: bool,
-) -> Result<()> {
+) -> Result<bool> {
     let total_problems = day_config.subconfig.len();
     let day_pb = gctx()
         .multiprogress
@@ -197,9 +196,10 @@ fn validate_day(
             .unwrap()
             .progress_chars("=> "),
     );
+    let mut failed = false;
     for (idx, (_, problem_config)) in day_config.subconfig.iter().enumerate() {
         day_pb.set_message(format!("处理第 {}/{} 题", idx + 1, total_problems));
-        validate_problem(problem_config, target, object, false)?;
+        failed |= validate_problem(problem_config, target, object, false)?;
         day_pb.inc(1);
     }
     if in_day {
@@ -207,15 +207,19 @@ fn validate_day(
     } else {
         day_pb.finish_and_clear();
     }
-    Ok(())
+    Ok(failed)
 }
 
 pub fn main(args: ValidateArgs) -> Result<()> {
     let Config {
         config,
         location: current_location,
-    } = gctx().config.as_ref().context("找不到配置文件")?;
+    } = gctx()
+        .config
+        .as_ref()
+        .ok_or_else(|| user_error!("找不到配置文件"))?;
 
+    let mut failed = false;
     match current_location {
         CurrentLocation::Problem(day_key, prob_key) => {
             let day_config = config
@@ -226,14 +230,14 @@ pub fn main(args: ValidateArgs) -> Result<()> {
                 .subconfig
                 .get(prob_key)
                 .with_context(|| format!("未找到题目配置：{}", prob_key))?;
-            validate_problem(problem_config, args.target, &args.object, true)?;
+            failed |= validate_problem(problem_config, args.target, &args.object, true)?;
         }
         CurrentLocation::Day(day_key) => {
             let day_config = config
                 .subconfig
                 .get(day_key)
                 .with_context(|| format!("未找到天配置：{}", day_key))?;
-            validate_day(day_config, args.target, &args.object, true)?;
+            failed = validate_day(day_config, args.target, &args.object, true)?;
         }
         CurrentLocation::Root => {
             let total_days = config.subconfig.len();
@@ -248,14 +252,17 @@ pub fn main(args: ValidateArgs) -> Result<()> {
             );
             for (day_idx, (_, day_config)) in config.subconfig.iter().enumerate() {
                 day_pb.set_message(format!("处理第 {}/{} 天", day_idx + 1, total_days));
-                validate_day(day_config, args.target, &args.object, false)?;
+                failed |= validate_day(day_config, args.target, &args.object, false)?;
                 day_pb.inc(1);
             }
             day_pb.finish_with_message("校验完成！");
         }
-        CurrentLocation::None => bail!("此命令必须在工程下执行"),
+        CurrentLocation::None => user_bail!("此命令必须在工程下执行"),
     }
 
+    if failed {
+        user_bail!();
+    }
     Ok(())
 }
 

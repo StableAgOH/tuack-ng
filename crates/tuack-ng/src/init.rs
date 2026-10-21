@@ -93,12 +93,16 @@ fn init_log(verbose: &bool) -> Result<MultiProgress> {
             builder = builder.logger(ConfigLogger::builder().build(*target, LevelFilter::Trace));
         }
     }
-    let config = builder.build(Root::builder().appender("stdout").build(root_level))?;
+    let config = builder
+        .build(Root::builder().appender("stdout").build(root_level))
+        .context("日志初始化失败")?;
 
     let logger: log4rs::Logger = Logger::new(config);
     let level = logger.max_log_level();
     let multi = MultiProgress::new();
-    LogWrapper::new(multi.clone(), logger).try_init().unwrap();
+    LogWrapper::new(multi.clone(), logger)
+        .try_init()
+        .context("日志初始化失败")?;
     log::set_max_level(level);
 
     Ok(multi)
@@ -207,9 +211,11 @@ fn init_context(
         })
         .unwrap_or_else(|| assets_dirs[0].join("langs.json"));
 
-    let langs_content = fs::read_to_string(langs).unwrap();
+    let langs_content = fs::read_to_string(&langs)
+        .with_context(|| format!("读取语言配置失败：{}", langs.display()))?;
 
-    let languages = serde_json::from_str(&langs_content)?;
+    let languages = serde_json::from_str(&langs_content)
+        .with_context(|| format!("解析语言配置失败：{}", langs.display()))?;
 
     let plugins = tuack_utils::plugin::manager::PluginManager::discover(
         &assets_dirs,

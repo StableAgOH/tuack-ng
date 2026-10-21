@@ -29,9 +29,7 @@ pub struct DocArgs {
 
 pub fn main(args: DocArgs) -> Result<()> {
     match args.target {
-        Targets::Format(args) => format::main(args)?,
-        Targets::Check(args) => check::main(args)?,
+        Targets::Format(args) => format::main(args),
+        Targets::Check(args) => check::main(args),
     }
-
-    Ok(())
 }

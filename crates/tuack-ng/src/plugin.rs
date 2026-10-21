@@ -82,7 +82,10 @@ fn state_label(state: &PluginState) -> String {
 
 /// 按包名查找插件状态 [`PluginStatus`]
 fn find(name: &str) -> Result<&'static PluginStatus> {
-    gctx().plugins.plugin(name)
+    gctx()
+        .plugins
+        .plugin(name)
+        .map_err(|e| anyhow::Error::new(user_error!("找不到插件 {}：{}", name, e)))
 }
 
 fn list() -> Result<()> {
@@ -291,7 +294,7 @@ fn confirm(prompt: &str, yes: bool) -> Result<bool> {
         return Ok(true);
     }
     if !std::io::stdin().is_terminal() {
-        bail!("非交互终端：请加 `-y` 显式确认（不推荐）");
+        user_bail!("终端不可交互，请加 `-y` 显式确认");
     }
     Ok(
         dialoguer::Confirm::with_theme(&dialoguer::theme::ColorfulTheme::default())

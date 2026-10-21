@@ -94,7 +94,13 @@ fn render_message(markdown: &str, path: &Path, rule_id: &str, message: &CheckInf
     }
 }
 
-fn print_messages(messages: CheckResult, path: &Path, checker: &dyn CheckRule, markdown: &str) {
+/// 输出规则发现的问题，返回是否发现
+fn print_messages(
+    messages: CheckResult,
+    path: &Path,
+    checker: &dyn CheckRule,
+    markdown: &str,
+) -> bool {
     match messages {
         CheckResult::Untagged(num) => {
             if num > 0 {
@@ -110,17 +116,23 @@ fn print_messages(messages: CheckResult, path: &Path, checker: &dyn CheckRule, m
                     .cyan(),
                     num
                 );
+                true
+            } else {
+                false
             }
         }
         CheckResult::Tagged(result) => {
+            let found = !result.is_empty();
             for message in result {
                 render_message(markdown, path, &checker.manifest().name, &message);
             }
+            found
         }
     }
 }
 
-pub fn check(problem_config: &ProblemConfig) -> Result<()> {
+/// 检查单个题目，返回是否发现问题
+pub fn check(problem_config: &ProblemConfig) -> Result<bool> {
     let markdown_path = problem_config.path.join("statement.md");
 
     let markdown_text = fs::read_to_string(&markdown_path)?;
@@ -129,29 +141,32 @@ pub fn check(problem_config: &ProblemConfig) -> Result<()> {
 
     let checkers = get_checkers();
 
+    let mut reported = false;
     for checker in &checkers {
         // 每个规则先应用文本检查，再应用 AST 检查
         if checker.manifest().markdown_checker {
             debug!("正在应用文本检查器 {}", checker.manifest().name);
             let messages = checker.check_markdown(&markdown_text, problem_config)?;
-            print_messages(messages, &markdown_path, checker.as_ref(), &markdown_text);
+            reported |= print_messages(messages, &markdown_path, checker.as_ref(), &markdown_text);
         }
 
         if checker.manifest().ast_checker {
             debug!("正在应用检查器 {}", checker.manifest().name);
             let messages = checker.check_ast(&ast, &markdown_text, problem_config)?;
-            print_messages(messages, &markdown_path, checker.as_ref(), &markdown_text);
+            reported |= print_messages(messages, &markdown_path, checker.as_ref(), &markdown_text);
         }
     }
 
-    Ok(())
+    Ok(reported)
 }
 
-pub fn check_day(day_config: &ContestDayConfig) -> Result<()> {
+/// 检查一天，返回是否发现问题
+pub fn check_day(day_config: &ContestDayConfig) -> Result<bool> {
+    let mut reported = false;
     for (_, problem_config) in &day_config.subconfig {
-        check(problem_config)?;
+        reported |= check(problem_config)?;
     }
-    Ok(())
+    Ok(reported)
 }
 
 fn explain(id: String) -> Result<()> {
@@ -164,7 +179,7 @@ fn explain(id: String) -> Result<()> {
         }
     }
 
-    bail!("找不到规则 {}", id);
+    user_bail!("找不到规则 {}", id);
 }
 
 pub fn main(args: CheckArgs) -> Result<()> {
@@ -173,20 +188,23 @@ pub fn main(args: CheckArgs) -> Result<()> {
         return Ok(());
     }
 
-    let config = gctx().config.as_ref().context("没有可用的工程")?;
+    let Some(config) = gctx().config.as_ref() else {
+        user_bail!("没有可用的工程");
+    };
 
+    let mut reported = false;
     match &config.location {
-        CurrentLocation::None => bail!("没有可用的工程"),
+        CurrentLocation::None => user_bail!("没有可用的工程"),
         CurrentLocation::Root => {
             for (_, day_config) in &config.config.subconfig {
-                check_day(day_config)?;
+                reported |= check_day(day_config)?;
             }
         }
         CurrentLocation::Day(day) => {
-            check_day(config.config.subconfig.get(day).unwrap())?;
+            reported |= check_day(config.config.subconfig.get(day).unwrap())?;
         }
         CurrentLocation::Problem(day, problem) => {
-            check(
+            reported |= check(
                 config
                     .config
                     .subconfig
@@ -199,5 +217,8 @@ pub fn main(args: CheckArgs) -> Result<()> {
         }
     }
 
+    if reported {
+        user_bail!();
+    }
     Ok(())
 }
