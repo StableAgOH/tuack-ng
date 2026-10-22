@@ -1,10 +1,9 @@
 use crate::prelude::*;
 use crate::utils::filesystem::create_or_clear_dir;
+use crate::utils::hash::sha256_hex;
 use clap::{Args, Subcommand};
 use owo_colors::OwoColorize;
 use path_slash::PathExt as _;
-use sha2::Digest;
-use sha2::Sha256;
 use tuack_utils::ren::manifest::TemplateManifest;
 
 #[derive(Args, Debug)]
@@ -29,15 +28,6 @@ pub enum DevelopCommands {
     /// 打包操作
     #[command(version)]
     Wrap,
-}
-
-fn sha256(src_path: &PathBuf) -> Result<String> {
-    let mut file = std::fs::File::open(src_path)?;
-    let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)?;
-    let hash = hasher.finalize();
-    let hash_hex = format!("{:x}", hash);
-    Ok(hash_hex)
 }
 
 pub fn main(args: DevelopArgs) -> Result<()> {
@@ -219,7 +209,7 @@ fn wrap() -> Result<()> {
             for file in filelist {
                 let sha256 = format!(
                     "{}{}",
-                    sha256(&file)?,
+                    sha256_hex(fs::File::open(&file)?)?,
                     file.extension()
                         .map(|ext| format!(".{}", ext.to_string_lossy()))
                         .unwrap_or_default()

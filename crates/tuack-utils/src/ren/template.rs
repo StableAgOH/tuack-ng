@@ -1,6 +1,7 @@
 use crate::prelude::*;
 use crate::ren::tools;
 use anyhow::Result;
+use minijinja::value::Serde;
 use minijinja::{Environment, Value, context};
 use owo_colors::OwoColorize;
 use std::sync::{Arc, Mutex};
@@ -297,16 +298,19 @@ pub fn render_template(
     ]);
 
     // 创建上下文
+    let sample = Value::from_pairs(sample);
+    let tools = Value::from_pairs(tools);
+    let statement = Value::from_pairs(statement);
     let ctx = context! {
-        problem => AsSerde::<ProblemConfig, FullView>::new(problem.clone()),
-        day => AsSerde::<ContestDayConfig, FullView>::new(day.clone()),
-        contest => AsSerde::<ContestConfig, FullView>::new(contest.clone()),
-        data_cases => problem.runtime.inherited_data,
-        sample_cases => problem.runtime.samples,
+        problem => Serde(AsSerde::<ProblemConfig, FullView>::new(problem.clone())),
+        day => Serde(AsSerde::<ContestDayConfig, FullView>::new(day.clone())),
+        contest => Serde(AsSerde::<ContestConfig, FullView>::new(contest.clone())),
+        data_cases => Serde(&problem.runtime.inherited_data),
+        sample_cases => Serde(&problem.runtime.samples),
 
         sample => sample,
         tools => tools,
-        statement => statement,
+        statement => statement.clone(),
         s => statement
     };
 

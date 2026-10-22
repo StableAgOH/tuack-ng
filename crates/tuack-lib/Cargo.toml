@@ -9,15 +9,16 @@ repository.workspace = true
 readme = "README.md"
 keywords = ["tuack-ng", "oi", "acm", "contest"]
 categories = ["development-tools"]
+rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
 bytesize.workspace = true
 indexmap.workspace = true
 serde.workspace = true
-serde_bytes.workspace = true
+serde_bytes = "0.11.19"
 serde_many.workspace = true
-thiserror.workspace = true
+thiserror = "2.0.21"
 
 [dependencies.tuack-ng-parser]
 workspace = true

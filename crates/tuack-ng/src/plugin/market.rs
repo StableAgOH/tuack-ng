@@ -1,5 +1,6 @@
 use crate::prelude::*;
 use crate::utils::aligned::AlignedFields;
+use crate::utils::hash::sha256_hex;
 use clap::{Args, Subcommand};
 use owo_colors::OwoColorize;
 use std::time::Duration;
@@ -318,7 +319,7 @@ fn install_plugin(plugin: &MarketplacePlugin, dest: &Path) -> Result<()> {
     let body = response.body_mut().with_config().limit(MAX_ARCHIVE_BYTES);
     std::io::copy(&mut body.reader(), archive.as_file_mut()).context("下载插件失败")?;
 
-    let actual = sha256_hex(archive.reopen()?)?;
+    let actual = sha256_hex(archive.reopen()?).context("计算 sha256 失败")?;
     if actual != plugin.sha256.to_lowercase() {
         bail!("sha256 校验失败：期望 {}，实际 {}", plugin.sha256, actual);
     }
@@ -391,14 +392,6 @@ fn install_plugin(plugin: &MarketplacePlugin, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 流式计算 sha256（十六进制小写）。
-fn sha256_hex(mut reader: impl std::io::Read) -> Result<String> {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    std::io::copy(&mut reader, &mut hasher).context("计算 sha256 失败")?;
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
 /// 解包 zip 文件到 `dest`（拒绝越界路径，限制条目数与解压体积）。
 fn extract_zip(archive_path: &Path, dest: &Path) -> Result<()> {
     let mut archive = zip::ZipArchive::new(fs::File::open(archive_path)?)?;
@@ -414,7 +407,10 @@ fn extract_zip(archive_path: &Path, dest: &Path) -> Result<()> {
             bail!("归档解压体积超出上限");
         }
         let Some(rel) = entry.enclosed_name() else {
-            bail!("归档内非法路径：{}", entry.name());
+            bail!(
+                "归档内非法路径：{}",
+                String::from_utf8_lossy(entry.name_raw())
+            );
         };
         let out = dest.join(rel);
         if entry.is_dir() {

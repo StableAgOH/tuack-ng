@@ -6,7 +6,7 @@ use clap::Args;
 use clap::ValueEnum;
 use indicatif::ProgressBar;
 use owo_colors::OwoColorize;
-use rand::Rng;
+use rand::RngExt;
 
 use crate::context::gctx;
 use crate::prelude::*;

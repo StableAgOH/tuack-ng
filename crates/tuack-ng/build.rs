@@ -4,7 +4,7 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
-use vergen::{BuildBuilder, CargoBuilder, Emitter, RustcBuilder, SysinfoBuilder};
+use vergen::{Build, Cargo, Emitter, Rustc, Sysinfo};
 
 /// 返回 workspace 根目录（crates/tuack-ng 的父目录的父目录），assets/vendor 都在根下
 fn workspace_root() -> PathBuf {
@@ -69,24 +69,16 @@ fn main() {
         }
     }
 
-    let build = BuildBuilder::default()
-        .build_timestamp(true)
-        .build()
-        .unwrap();
-    let cargo = CargoBuilder::default()
+    let build = Build::builder().build_timestamp(true).build();
+    let cargo = Cargo::builder()
         .features(true)
         .debug(true)
         .opt_level(true)
         .target_triple(true)
         .dependencies(true)
-        .build()
-        .unwrap();
-    let rustc = RustcBuilder::default()
-        .semver(true)
-        .channel(true)
-        .build()
-        .unwrap();
-    let si = SysinfoBuilder::default().os_version(true).build().unwrap();
+        .build();
+    let rustc = Rustc::builder().semver(true).channel(true).build();
+    let si = Sysinfo::builder().os_version(true).build();
 
     Emitter::default()
         .add_instructions(&build)

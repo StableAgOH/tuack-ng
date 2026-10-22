@@ -9,15 +9,15 @@ repository = "https://github.com/tuackng/tuack-ng"
 homepage = "https://github.com/tuackng/tuack-ng"
 keywords = ["markdown", "parser", "ast", "tuack-ng", "typst"]
 categories = ["parser-implementations", "text-processing"]
-rust-version = "1.85"
+rust-version.workspace = true
 
 [dependencies]
 rushdown = "0.18"
 serde = { workspace = true, features = ["derive"], optional = true }
-unicode-width = "0.1"
+unicode-width = "0.2.2"
 
 [features]
 serde = ["dep:serde"]
 
 [dev-dependencies]
-serde_json = "1"
+serde_json = "1.0.154"
