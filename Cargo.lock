@@ -3824,10 +3824,11 @@ dependencies = [
 
 [[package]]
 name = "tuack-plugin-sdk"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "extism-pdk",
  "log",
+ "semver",
  "tuack-lib",
  "tuack-ng-parser",
 ]
