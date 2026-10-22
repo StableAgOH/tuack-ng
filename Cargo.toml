@@ -10,7 +10,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "1.1.0-alpha.3"
+version = "1.1.0-alpha.4"
 edition = "2024"
 rust-version = "1.96"
 authors = ["Pulsar <Pulsar33550336@163.com>"]
