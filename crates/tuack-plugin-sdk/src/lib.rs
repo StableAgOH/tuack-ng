@@ -76,12 +76,14 @@ pub fn __report_error(e: &extism_pdk::Error) {
 
 #[cfg(test)]
 mod tests {
-    /// SDK 版本须与宿主插件 API 版本一致：插件清单里的 `pluginapi` 就写 SDK 版本。
+    use semver::Version;
+
+    /// SDK 版本与宿主插件 API 版本须 major.minor 一致（patch 可独立升）：插件清单里的
+    /// `pluginapi` 写 SDK 版本，宿主判定兼容性时忽略 patch。
     #[test]
     fn sdk_version_matches_plugin_api() {
-        assert_eq!(
-            env!("CARGO_PKG_VERSION"),
-            tuack_lib::plugin::PLUGIN_API_VERSION
-        );
+        let sdk = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        let api = Version::parse(tuack_lib::plugin::PLUGIN_API_VERSION).unwrap();
+        assert_eq!((sdk.major, sdk.minor), (api.major, api.minor));
     }
 }
