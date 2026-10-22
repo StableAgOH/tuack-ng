@@ -32,7 +32,7 @@ serde_json = { version = "1.0.154", features = ["preserve_order"] }
 serde_many = { version = "0.1.0", features = ["derive"] }
 sysinfo = "0.39.6"
 tempfile = "3.27.0"
-tuack-ng-parser = { version = "1.0.3", path = "crates/tuack-ng-parser" }
+tuack-ng-parser = { version = "1.0.4", path = "crates/tuack-ng-parser" }
 
 [profile.release]
 opt-level = 3

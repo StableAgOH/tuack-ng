@@ -3814,7 +3814,7 @@ dependencies = [
 
 [[package]]
 name = "tuack-ng-parser"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "rushdown",
  "serde",
