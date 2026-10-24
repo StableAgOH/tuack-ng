@@ -1,0 +1,45 @@
+# AGENTS.md
+
+Tuack-NG：OI/ACM 题目开发工具链（Rust，edition 2024）。生成比赛脚手架、渲染题面（Typst PDF / Markdown）、测试题解。
+
+各 crate 的细节见其根目录的 `AGENTS.md`：
+
+- [`tuack-ng`](crates/tuack-ng/AGENTS.md) —— CLI 前端
+- [`tuack-lib`](crates/tuack-lib/AGENTS.md) —— 后端契约
+- [`tuack-config`](crates/tuack-config/AGENTS.md) —— `conf.json` 数据模型
+- [`tuack-utils`](crates/tuack-utils/AGENTS.md) —— 契约实现
+- [`tuack-plugin-sdk`](crates/tuack-plugin-sdk/AGENTS.md) —— 插件 SDK
+- [`tuack-ng-parser`](crates/tuack-ng-parser/AGENTS.md) —— Markdown 解析器
+
+依赖方向（箭头指向被依赖方；禁止反向依赖）：
+
+```mermaid
+flowchart TD
+  cli["tuack-ng (CLI)"]
+  utils["tuack-utils (实现)"]
+  config["tuack-config (配置模型)"]
+  lib["tuack-lib (契约)"]
+  sdk["tuack-plugin-sdk (插件 SDK)"]
+  parser["tuack-ng-parser (AST / 解析)"]
+
+  cli --> utils
+  cli --> config
+  cli --> lib
+  cli --> parser
+  utils --> config
+  utils --> lib
+  utils --> parser
+  config --> lib
+  lib --> parser
+  sdk --> lib
+  sdk --> parser
+```
+
+## 全局约定
+
+- 注释规则见 `comment-strategy` skill（`.agents/skills/comment-strategy/SKILL.md`）。
+- 写 Issue / Bug 报告用 `issue-report` skill（`.agents/skills/issue-report/SKILL.md`）。
+- 输入/输出/答案以流处理，禁止整份读入内存；契约见 [`tuack-lib`](crates/tuack-lib/AGENTS.md)。
+- 构建与开发走 `just`（见 `justfile`）：`just build`、`just build-release`、`just run +args=…`、`just unwrap` / `wrap`。
+- `cargo test --workspace` 跑 Rust 测试；`tuack-ng test` 测的是题解，两者无关。
+- 提交信息与分支选择见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。

@@ -5,6 +5,5 @@
 .direnv/
 /assets/checkers/*
 !/assets/checkers/*.cpp
-/AGENTS.md
 /docs
 .env-local
