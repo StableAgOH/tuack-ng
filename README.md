@@ -140,13 +140,12 @@ Tuack-NG（`Tuack New Generation`）是一套完整的用于辅助 OI/ACM 竞赛
 |   分支   |             开发状态             |              状态              |
 | :------: | :------------------------------: | :----------------------------: |
 | `master` | 正在此分支上开发 [1.1 - Sparkle] | [![master-badge]][master-link] |
-|  `1.0`   | 正在此分支上维护 [1.0 - Kaslana] |    [![1.0-badge]][1.0-link]    |
+|  `1.0`   |  正在此分支上维护 1.0 - Kaslana  |    [![1.0-badge]][1.0-link]    |
 
-[1.1 - Sparkle]: https://github.com/tuackng/tuack-ng/milestone/3
+[1.1 - Sparkle]: https://github.com/tuackng/tuack-ng/milestone/1
 [master-badge]: https://github.com/tuackng/tuack-ng/actions/workflows/rust.yml/badge.svg?branch=master&style=flat_square
 [master-link]: https://github.com/tuackng/tuack-ng/actions/workflows/rust.yml?query=branch%master
 
-[1.0 - Kaslana]: https://github.com/tuackng/tuack-ng/milestone/1
 [1.0-badge]: https://github.com/tuackng/tuack-ng/actions/workflows/rust.yml/badge.svg?branch=1.0&style=flat_square
 [1.0-link]: https://github.com/tuackng/tuack-ng/actions/workflows/rust.yml?query=branch%3A1.0
 
