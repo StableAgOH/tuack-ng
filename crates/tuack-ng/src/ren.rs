@@ -214,14 +214,16 @@ fn build_render_document(
 
     // 处理注意事项文件
     let precaution_path = config.path.join("precaution.md");
-    if !precaution_path.exists() {
-        user_bail!("未找到注意事项文件：{}", precaution_path.display());
-    }
-    let precaution_ast = parse(&fs::read_to_string(&precaution_path)?);
-    if !ImageCollector::collect(&precaution_ast).is_empty() {
-        user_bail!("注意事项不支持图片");
-    }
-    info!("处理注意事项文件：{}", precaution_path.display());
+    let precaution = if precaution_path.exists() {
+        let ast = parse(&fs::read_to_string(&precaution_path)?);
+        if !ImageCollector::collect(&ast).is_empty() {
+            user_bail!("注意事项不支持图片");
+        }
+        info!("处理注意事项文件：{}", precaution_path.display());
+        Some(ast)
+    } else {
+        None
+    };
 
     let config = build_ren_config(config, day_config, params)?;
 
@@ -229,7 +231,7 @@ fn build_render_document(
         RenderDocument {
             config,
             problems,
-            precaution: Some(precaution_ast),
+            precaution,
         },
         assets,
     ))

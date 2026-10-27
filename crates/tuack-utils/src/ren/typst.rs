@@ -163,10 +163,12 @@ impl Renderer for TypstRenderer {
             }
         }
 
-        if let Some(precaution) = &doc.precaution {
-            let typst_output = format!("#import \"utils.typ\": *\n{}", render_typst(precaution));
-            fs::write(self.work_dir.join("precaution.typ"), typst_output)?;
-        }
+        // 模板会无条件 include precaution.typ，无注意事项时写空文件
+        let precaution_typst = match &doc.precaution {
+            Some(precaution) => format!("#import \"utils.typ\": *\n{}", render_typst(precaution)),
+            None => String::new(),
+        };
+        fs::write(self.work_dir.join("precaution.typ"), precaution_typst)?;
 
         let data_json = self.generate_conf(doc);
         let data_json_str = serde_json::to_string_pretty(&data_json)?;
