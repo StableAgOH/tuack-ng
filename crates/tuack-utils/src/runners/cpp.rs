@@ -2,16 +2,18 @@ use std::process::Command as StdCommand;
 use std::process::Stdio;
 use tempfile::TempDir;
 
+use super::{failed_run, finish_run, inject_input, wire_stdio};
 use crate::command::string_to_command;
 use crate::prelude::*;
 use crate::process::ProcessSupervisor;
-use tuack_lib::data::Reader;
-use tuack_lib::utils::compiler::{IoMode, RunResult, RunSpec, Runner, RunnerManifest};
+use tuack_lib::utils::compiler::{
+    RunError, RunResult, RunSpec, Runner, RunnerError, RunnerManifest,
+};
 
 /// C++ 运行器的 [`Runner`] 实现：用 `g++` 编译源文件后执行；`set_interactive` 后额外
 /// 链接 grader.cpp，并把交互库头文件复制为 `{program_name}.h` 供其包含
 pub struct CppRunner {
-    tmp_dir: TempDir,
+    tmp_dir: Arc<TempDir>,
     source: PathBuf,
     compile_args: String,
     program_name: String,
@@ -33,7 +35,7 @@ impl CppRunner {
     ) -> Result<Self> {
         let source = source.into();
         let program_name = program_name.into();
-        let tmp_dir = TempDir::with_prefix("tuack-ng-runner-")?;
+        let tmp_dir = Arc::new(TempDir::with_prefix("tuack-ng-runner-")?);
         let ext = source
             .extension()
             .context("没有后缀名")?
@@ -102,7 +104,7 @@ impl Runner for CppRunner {
 
     fn prepare(&mut self) -> Result<()> {
         if !self.tmp_dir.path().exists() {
-            fs::create_dir_all(&self.tmp_dir)?;
+            fs::create_dir_all(self.tmp_dir.path())?;
         }
 
         let mut cmd = self.get_compile_command()?;
@@ -139,7 +141,7 @@ impl Runner for CppRunner {
         Ok(())
     }
 
-    fn execute(&mut self, spec: RunSpec) -> Result<RunResult> {
+    fn execute(&mut self, spec: RunSpec) -> Result<RunResult, RunnerError> {
         let RunSpec {
             limits,
             io_mode,
@@ -151,67 +153,22 @@ impl Runner for CppRunner {
             self.program_name,
             std::env::consts::EXE_SUFFIX
         ));
-        if !program_path.exists() {
-            bail!("可执行文件不存在：{}", program_path.display());
-        }
 
         let mut cmd = StdCommand::new(&program_path);
-        cmd.current_dir(&self.tmp_dir);
+        cmd.current_dir(self.tmp_dir.path());
 
-        // IO 模式决定数据读写方式：Stdio 把输入写入文件后接入 stdin、标准输出落文件；
-        // File 由程序自行读写 input_name/output_name，标准流置空
-        match &io_mode {
-            IoMode::Stdio => {
-                let stdin_path = self.tmp_dir.path().join("pipe_stdin");
-                let stdout_path = self.tmp_dir.path().join("pipe_stdout");
-                {
-                    let mut stdin_file = std::fs::File::create(&stdin_path)?;
-                    std::io::copy(&mut input, &mut stdin_file)?;
-                }
-                let stdin_handle = std::fs::File::open(&stdin_path)?;
-                let stdout_handle = std::fs::File::create(&stdout_path)?;
-                cmd.stdin(Stdio::from(stdin_handle));
-                cmd.stdout(Stdio::from(stdout_handle));
-            }
-            IoMode::File { input_name, .. } => {
-                let input_path = self.tmp_dir.path().join(input_name);
-                {
-                    let mut input_file = std::fs::File::create(&input_path)?;
-                    std::io::copy(&mut input, &mut input_file)?;
-                }
-                cmd.stdin(Stdio::null());
-                cmd.stdout(Stdio::null());
-            }
+        if let Err(error) = inject_input(self.tmp_dir.path(), &io_mode, &mut *input) {
+            return Ok(failed_run(RunError::Input(error)));
+        }
+        if let Err(error) = wire_stdio(self.tmp_dir.path(), &io_mode, &mut cmd) {
+            return Ok(failed_run(RunError::Stdio(error)));
         }
 
-        let stderr_path = self.tmp_dir.path().join("pipe_stderr");
-        let stderr_file = std::fs::File::create(&stderr_path)?;
-        cmd.stderr(Stdio::from(stderr_file));
-
         let outcome = ProcessSupervisor::new(limits).supervise_blocking(cmd)?;
-
-        let stderr = std::fs::read(stderr_path)?;
-
-        // 输出文件不存在视为无输出；其余 IO 错误上抛
-        let output: Option<Box<dyn Reader>> = {
-            let output_path = match &io_mode {
-                IoMode::Stdio => self.tmp_dir.path().join("pipe_stdout"),
-                IoMode::File { output_name, .. } => self.tmp_dir.path().join(output_name),
-            };
-            if !output_path.exists() {
-                None
-            } else {
-                Some(Box::new(std::fs::File::open(&output_path)?))
-            }
-        };
-
-        Ok(RunResult {
-            status: outcome.status,
-            time: outcome.time,
-            memory: outcome.memory,
-            output,
-            stderr,
-        })
+        match finish_run(outcome, &self.tmp_dir, &io_mode) {
+            Ok(run) => Ok(run),
+            Err(error) => Ok(failed_run(RunError::Output(error))),
+        }
     }
 
     fn cleanup(&mut self) -> Result<()> {

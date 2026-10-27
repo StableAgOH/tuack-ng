@@ -1,3 +1,4 @@
+use std::io;
 use std::time::Duration;
 
 use crate::data::Reader;
@@ -42,21 +43,21 @@ pub enum RunStatus {
     NonZeroExit(i32),
     TimeLimitExceeded,
     MemoryLimitExceeded,
-    /// 运行器内部错误，如进程监控失败
-    InternalError(anyhow::Error),
+    /// 本次运行无法完成：进程创建、输入注入或产物收集失败
+    Incomplete(RunError),
 }
 
 /// [`Runner::execute`] 的返回结果
 pub struct RunResult {
     pub status: RunStatus,
-    /// 运行时间；运行器内部错误时为 `None`。
+    /// 运行时间；本次运行无法完成时为 `None`。
     pub time: Option<Duration>,
-    /// 峰值内存（字节）；未采到读数或运行器内部错误时为 `None`。
+    /// 峰值内存（字节）；未采到读数或本次运行无法完成时为 `None`。
     pub memory: Option<u64>,
     /// 程序输出流；`None` 表示输出文件不存在（文件 IO 程序未写输出）。
     pub output: Option<Box<dyn Reader>>,
-    /// 程序 stderr
-    pub stderr: Vec<u8>,
+    /// 程序标准错误流；本次运行无法完成时为 `None`
+    pub stderr: Option<Box<dyn Reader>>,
 }
 
 /// IO 模式
@@ -81,6 +82,70 @@ pub struct RunSpec {
     pub io_mode: IoMode,
     /// 输入内容：标准 IO 写入其标准输入，文件 IO 写入其输入文件
     pub input: Box<dyn Reader>,
+}
+
+/// 子进程监督失败的原因
+#[derive(Debug, thiserror::Error)]
+pub enum MonitorError {
+    /// 子进程已被回收，取不到 PID
+    #[error("无法获取子进程 PID")]
+    MissingPid,
+    /// 两轮都未能发送终止信号
+    #[error("终止子进程 {pid} 失败：{source}")]
+    Kill {
+        pid: u32,
+        #[source]
+        source: io::Error,
+    },
+    /// 发出终止信号后进程未在等待期限内退出
+    #[error("等待子进程 {pid} 退出超时")]
+    WaitTimeout { pid: u32 },
+    /// 等待子进程退出失败
+    #[error("等待子进程退出失败：{0}")]
+    Wait(#[source] io::Error),
+    /// 回收子进程失败
+    #[error("回收子进程 {pid} 失败：{source}")]
+    Reap {
+        pid: u32,
+        #[source]
+        source: io::Error,
+    },
+}
+
+/// 本次运行无法完成的原因
+#[derive(Debug, thiserror::Error)]
+pub enum RunError {
+    /// 程序无法启动：可执行文件不存在或进程创建失败
+    #[error("无法启动程序 {program}：{source}")]
+    Spawn {
+        /// 启动的程序
+        program: String,
+        #[source]
+        source: io::Error,
+    },
+    /// 注入输入失败：创建输入文件或写入输入流失败
+    #[error("注入输入失败：{0}")]
+    Input(#[source] io::Error),
+    /// 连接标准流失败：创建或打开标准输入/输出/错误文件失败
+    #[error("连接标准流失败：{0}")]
+    Stdio(#[source] io::Error),
+    /// 收集运行产物失败：读取标准错误或打开输出文件失败
+    #[error("读取运行产物失败：{0}")]
+    Output(#[source] io::Error),
+}
+
+/// 运行器无法完成执行请求的原因
+///
+/// [`RunnerError::Command`] 发生在启动子进程之前，属配置或运行器错误；
+/// [`RunnerError::Monitor`] 表示无法确认子进程状态或资源限制，不能继续评测。
+#[derive(Debug, thiserror::Error)]
+pub enum RunnerError {
+    /// 运行命令无法构造：语言模板渲染或解析失败
+    #[error("无法构造运行命令：{0}")]
+    Command(String),
+    /// 子进程监督失败，无法保证资源限制
+    #[error(transparent)]
+    Monitor(#[from] MonitorError),
 }
 
 /// 运行器：编译 + 资源限制执行。
@@ -109,10 +174,11 @@ pub trait Runner: Send {
 
     /// 按 `spec` 执行一次程序。
     ///
+    /// 程序无法启动、输入注入或产物收集失败，以及超时/超内存都不算错误，经返回值的
+    /// [`RunStatus`] 报告。
+    ///
     /// # Errors
     ///
-    /// 运行命令模板渲染或解析失败、程序无法启动（可执行文件不存在、spawn 失败），或
-    /// 执行期间的 IO 失败时返回 `Err`；超时与超内存不算错误，以
-    /// [`RunStatus::TimeLimitExceeded`] / [`RunStatus::MemoryLimitExceeded`] 由返回值报告。
-    fn execute(&mut self, spec: RunSpec) -> Result<RunResult>;
+    /// 运行器自身问题返回 [`RunnerError`]。
+    fn execute(&mut self, spec: RunSpec) -> Result<RunResult, RunnerError>;
 }

@@ -136,12 +136,140 @@ fn check_test_case(test_case: &TestCase, actual_score: u32) -> bool {
 
         debug!("条件：{}", expr);
 
-        if !eval_boolean(&expr).unwrap_or(false) {
-            return false;
+        match eval_boolean(&expr) {
+            Ok(true) => {}
+            Ok(false) => return false,
+            Err(error) => {
+                msg_error!("期望条件不合法：{}（{}）", condition, error);
+                return false;
+            }
         }
     }
 
     true
+}
+
+/// 解析测试者代码路径、构造运行器并完成交互配置
+///
+/// # Errors
+///
+/// 代码路径无法解析或不是文件、后缀名缺失或不受支持、运行器构造失败、交互配置
+/// 缺失或不可读，以及运行器不支持交互时返回 `Err`。
+fn build_runner(
+    day_config: &ContestDayConfig,
+    problem_config: &ProblemConfig,
+    test: &TestCase,
+    is_sample: bool,
+) -> Result<Box<dyn Runner>> {
+    let path = PathBuf::from_str(&test.path)?;
+    let path = if path.is_absolute() {
+        path
+    } else {
+        problem_config.path.join(path)
+    };
+    let path = dunce::canonicalize(&path)
+        .with_context(|| format!("测试代码路径无法解析：{}", path.display()))?;
+    if !path.is_file() {
+        bail!("测试代码不是文件：{}", path.display());
+    }
+    info!("文件路径：{}", path.display());
+
+    let extension = path
+        .extension()
+        .context("测试代码没有后缀名")?
+        .to_string_lossy()
+        .to_string();
+
+    let mut runner: Box<dyn Runner> = match extension.as_str() {
+        "cpp" => Box::new(CppRunner::new(
+            &path,
+            &day_config.compile,
+            problem_config.name.clone(),
+        )?),
+        _ => Box::new(GeneralRunner::new(
+            &path,
+            &day_config.compile,
+            problem_config.name.clone(),
+            &gctx().languages,
+        )?),
+    };
+
+    if problem_config.problem_type == ProblemType::Interactive {
+        if !runner.manifest().interactive {
+            bail!("该语言不支持交互");
+        }
+        let interactive = problem_config
+            .interactive
+            .as_ref()
+            .context("交互题目缺少交互配置")?;
+        let resolve_path = |path: &String| -> Result<PathBuf> {
+            let path = PathBuf::from_str(path)?;
+            let joined = if path.is_absolute() {
+                path
+            } else {
+                problem_config.path.join(path)
+            };
+            dunce::canonicalize(&joined)
+                .with_context(|| format!("交互文件路径无法解析：{}", joined.display()))
+        };
+        let grader_path = if is_sample {
+            match &interactive.sample_grader {
+                Some(sg) => resolve_path(sg)?,
+                None => resolve_path(&interactive.grader)?,
+            }
+        } else {
+            resolve_path(&interactive.grader)?
+        };
+        let header_path = resolve_path(&interactive.header)?;
+
+        runner.set_interactive(&grader_path, &header_path)?;
+    }
+
+    Ok(runner)
+}
+
+/// 输出并记录一个未完成评测的测试者的结果
+///
+/// 只留一行状态、总分 0。[`Target::Data`] 下返回 `true`（本题按未通过处理）；
+/// [`Target::Sample`] 不判失败，返回 `false`。
+fn record_tester_failure(
+    test_name: &str,
+    status: DisplayStatus,
+    message: Option<String>,
+    full_score: u32,
+    target: Target,
+) -> (ProblemTestResult, bool) {
+    let result = ProblemTestResult {
+        tester_name: test_name.to_string(),
+        test_case_results: vec![IndividualTestCaseResult {
+            test_case_id: 0,
+            status,
+            score: 0,
+            full_score,
+            time: "N/A".to_string(),
+            memory: "N/A".to_string(),
+            message,
+        }],
+        total_score: 0,
+        full_score,
+    };
+
+    msg_info!(
+        "{}",
+        format!(
+            "总得分 {}/{}",
+            0.to_string().cyan().bold(),
+            full_score.to_string().green().bold()
+        )
+        .bold()
+    );
+
+    let unmet = target == Target::Data;
+    if unmet {
+        msg_warn!("{}", "测试者未完成评测".bold());
+    }
+
+    (result, unmet)
 }
 
 fn write_results_to_csv(results: Vec<ProblemTestResult>, csv_path: &Path) -> Result<()> {
@@ -207,6 +335,30 @@ pub fn test_problem(
         Target::Sample => tuack_utils::data::problem_sample_data(problem_config),
     };
     let is_sample = matches!(target, Target::Sample);
+
+    // 该题目的满分：正式数据按 Subtask 满分之和，样例按数据点个数
+    let full_score: u32 = if is_sample {
+        data_items.len() as u32
+    } else {
+        problem_config
+            .runtime
+            .subtasks
+            .values()
+            .map(|g| g.max_score)
+            .sum()
+    };
+
+    let params = TaskParams {
+        io_mode: io_mode(problem_config),
+        time_limit: Duration::try_from_secs_f64(problem_config.time_limit).map_err(|_| {
+            user_error!(
+                "题目 {} 的时间限制不合法：{} 秒",
+                problem_config.name.magenta(),
+                problem_config.time_limit
+            )
+        })?,
+        memory_limit: problem_config.memory_limit,
+    };
 
     // 准备 Checker(无配置时用默认 normal diff 检查器兜底)
     let checker: Box<dyn Checker> = match &problem_config.checker {
@@ -284,12 +436,6 @@ pub fn test_problem(
         }
     };
 
-    let params = TaskParams {
-        io_mode: io_mode(problem_config),
-        time_limit: Duration::from_secs_f64(problem_config.time_limit),
-        memory_limit: problem_config.memory_limit,
-    };
-
     let mut all_test_results = Vec::new();
 
     let tester_pb = gctx()
@@ -320,106 +466,35 @@ pub fn test_problem(
             test_name.cyan()
         );
 
-        let path = if PathBuf::from_str(&test.path)?.is_absolute() {
-            PathBuf::from_str(&test.path)?
-        } else {
-            dunce::canonicalize(problem_config.path.join(&test.path))?
-        };
-        info!("文件路径：{}", path.display());
-
-        let mut runner: Box<dyn Runner> = match path
-            .extension()
-            .context("文件无后缀名")?
-            .to_string_lossy()
-            .to_string()
-            .as_str()
-        {
-            "cpp" => Box::new(CppRunner::new(
-                &path,
-                &day_config.compile,
-                problem_config.name.clone(),
-            )?),
-            _ => Box::new(GeneralRunner::new(
-                &path,
-                &day_config.compile,
-                problem_config.name.clone(),
-                &gctx().languages,
-            )?),
-        };
-
-        // 交互配置
-        if problem_config.problem_type == ProblemType::Interactive {
-            if runner.manifest().interactive {
-                let interactive = problem_config.interactive.as_ref().unwrap();
-                let resolve_path = |path: &String| -> Result<PathBuf> {
-                    let p = PathBuf::from_str(path)?;
-                    Ok(if p.is_absolute() {
-                        p
-                    } else {
-                        dunce::canonicalize(problem_config.path.join(p))?
-                    })
-                };
-                let grader_path = if is_sample {
-                    match &interactive.sample_grader {
-                        Some(sg) => resolve_path(sg)?,
-                        None => resolve_path(&interactive.grader)?,
-                    }
-                } else {
-                    resolve_path(&interactive.grader)?
-                };
-                let header_path = resolve_path(&interactive.header)?;
-
-                if !grader_path.exists() {
-                    user_bail!("grader 不存在")
-                }
-                if !header_path.exists() {
-                    user_bail!("header 不存在")
-                }
-
-                runner.set_interactive(&grader_path, &header_path)?;
-            } else {
-                user_bail!("该语言不支持交互")
+        // 初始化失败（路径、语言、交互配置）-> 该测试者记一行 UKE，继续下一个
+        let mut runner = match build_runner(day_config, problem_config, test, is_sample) {
+            Ok(runner) => runner,
+            Err(error) => {
+                let message = format!("{error:#}");
+                msg_item!("UKE".bright_black().bold(), "无法完成评测");
+                msg_error!("{}", message);
+                let (problem_result, failed) = record_tester_failure(
+                    test_name,
+                    DisplayStatus::UKE,
+                    Some(message),
+                    full_score,
+                    target,
+                );
+                unmet |= failed;
+                all_test_results.push(problem_result);
+                tester_pb.inc(1);
+                continue;
             }
-        }
+        };
 
         // 编译失败 -> 记录 CE，不进入评测
         if let Err(e) = runner.prepare() {
             msg_item!("CE".yellow().bold(), "编译错误");
             msg_error!("{}", e);
 
-            let full_score: u32 = if is_sample {
-                data_items.len() as u32
-            } else {
-                problem_config
-                    .runtime
-                    .subtasks
-                    .values()
-                    .map(|g| g.max_score)
-                    .sum()
-            };
-            let problem_result = ProblemTestResult {
-                tester_name: test_name.to_string(),
-                test_case_results: vec![IndividualTestCaseResult {
-                    test_case_id: 0,
-                    status: DisplayStatus::CE,
-                    score: 0,
-                    full_score: data_items.iter().map(|d| d.full_score()).sum(),
-                    time: "N/A".to_string(),
-                    memory: "N/A".to_string(),
-                    message: None,
-                }],
-                total_score: 0,
-                full_score,
-            };
-            msg_info!(
-                "{}",
-                format!(
-                    "总得分 {}/{}",
-                    0.to_string().cyan().bold(),
-                    problem_result.full_score.to_string().green().bold()
-                )
-                .bold()
-            );
+            let (problem_result, failed) =
+                record_tester_failure(test_name, DisplayStatus::CE, None, full_score, target);
+            unmet |= failed;
             all_test_results.push(problem_result);
             tester_pb.inc(1);
             continue;
@@ -582,7 +657,14 @@ pub fn test_problem(
         Target::Data => "result.csv",
         Target::Sample => "result-sample.csv",
     });
-    write_results_to_csv(all_test_results, &csv_path)?;
+    if let Err(error) = write_results_to_csv(all_test_results, &csv_path) {
+        user_bail!(
+            "题目 {} 的测试结果写入 {} 失败：{}",
+            problem_config.name.magenta(),
+            csv_path.display(),
+            error
+        );
+    }
 
     Ok(unmet)
 }
@@ -598,10 +680,15 @@ fn test_day(day_config: &ContestDayConfig, target: Target, in_day: bool) -> Resu
             .unwrap()
             .progress_chars("=> "),
     );
-    let mut unmet = false;
+    let mut failed = false;
     for (idx, (_, problem_config)) in day_config.subconfig.iter().enumerate() {
         day_pb.set_message(format!("处理第 {}/{} 题", idx + 1, total_problems));
-        unmet |= test_problem(day_config, problem_config, target, false)?;
+        match test_problem(day_config, problem_config, target, false) {
+            Ok(problem_unmet) => failed |= problem_unmet,
+            // 用户问题：跳过本题，继续其余题目
+            Err(error) if is_reported(&error) => failed = true,
+            Err(error) => return Err(error),
+        }
         day_pb.inc(1);
     }
     if in_day {
@@ -609,7 +696,7 @@ fn test_day(day_config: &ContestDayConfig, target: Target, in_day: bool) -> Resu
     } else {
         day_pb.finish_and_clear();
     }
-    Ok(unmet)
+    Ok(failed)
 }
 
 pub fn main(args: TestArgs) -> Result<()> {
@@ -621,7 +708,7 @@ pub fn main(args: TestArgs) -> Result<()> {
         .as_ref()
         .ok_or_else(|| user_error!("找不到配置文件"))?;
 
-    let mut unmet = false;
+    let mut failed = false;
     match current_location {
         CurrentLocation::Problem(day_key, prob_key) => {
             let day_config = config
@@ -632,14 +719,14 @@ pub fn main(args: TestArgs) -> Result<()> {
                 .subconfig
                 .get(prob_key)
                 .with_context(|| format!("未找到题目配置：{}", prob_key))?;
-            unmet |= test_problem(day_config, problem_config, args.target, true)?;
+            failed |= test_problem(day_config, problem_config, args.target, true)?;
         }
         CurrentLocation::Day(day_key) => {
             let day_config = config
                 .subconfig
                 .get(day_key)
                 .with_context(|| format!("未找到天配置：{}", day_key))?;
-            unmet |= test_day(day_config, args.target, true)?;
+            failed |= test_day(day_config, args.target, true)?;
         }
         CurrentLocation::Root => {
             let total_days = config.subconfig.len();
@@ -654,7 +741,7 @@ pub fn main(args: TestArgs) -> Result<()> {
             );
             for (day_idx, (_, day_config)) in config.subconfig.iter().enumerate() {
                 day_pb.set_message(format!("处理第 {}/{} 天", day_idx + 1, total_days));
-                unmet |= test_day(day_config, args.target, false)?;
+                failed |= test_day(day_config, args.target, false)?;
                 day_pb.inc(1);
             }
             day_pb.finish_with_message("测试完成！");
@@ -662,7 +749,7 @@ pub fn main(args: TestArgs) -> Result<()> {
         CurrentLocation::None => user_bail!("此命令必须在工程下执行"),
     }
 
-    if unmet {
+    if failed {
         user_bail!();
     }
     Ok(())

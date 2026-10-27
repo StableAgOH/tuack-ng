@@ -19,7 +19,7 @@ use tokio::process::Child;
 use tokio::time::{Instant, sleep, timeout};
 
 use crate::prelude::*;
-use tuack_lib::utils::compiler::{ResourceLimits, RunStatus};
+use tuack_lib::utils::compiler::{MonitorError, ResourceLimits, RunError, RunStatus, RunnerError};
 
 /// 监视器专用 runtime：供同步代码短时进入异步以监督子进程。
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -64,13 +64,22 @@ enum Finished {
 pub struct SuperviseOutcome {
     /// 结束状态
     pub status: RunStatus,
-    /// 用时；运行器内部错误时为 `None`（TLE/MLE 都记录终止时刻）
+    /// 用时；本次运行无法完成时为 `None`（TLE/MLE 都记录终止时刻）
     pub time: Option<Duration>,
-    /// 峰值内存（字节）；始终没采到读数或等待子进程失败时为 `None`
+    /// 峰值内存（字节）；始终没采到读数或本次运行无法完成时为 `None`
     pub memory: Option<u64>,
 }
 
 impl SuperviseOutcome {
+    /// 本次运行无法完成：没有用时与内存读数
+    fn incomplete(error: RunError) -> Self {
+        Self {
+            status: RunStatus::Incomplete(error),
+            time: None,
+            memory: None,
+        }
+    }
+
     /// 超时结束：用时是确认超时并终止子进程的时刻，含 200ms 终止宽限，只是下界
     fn timeout(time: Duration, memory: Option<u64>) -> Self {
         Self {
@@ -112,11 +121,23 @@ impl ProcessSupervisor {
     ///
     /// # Errors
     ///
-    /// 子进程启动失败，或 [`ProcessSupervisor::supervise`] 失败时返回 `Err`。
-    pub fn supervise_blocking(self, cmd: Command) -> Result<SuperviseOutcome> {
+    /// 子进程监督失败时返回 [`RunnerError::Monitor`]；子进程无法启动经
+    /// [`RunStatus::Incomplete`] 由返回值报告。
+    pub fn supervise_blocking(self, cmd: Command) -> Result<SuperviseOutcome, RunnerError> {
         monitor_runtime().block_on(async move {
-            let mut child = tokio::process::Command::from(cmd).spawn()?;
-            self.supervise(&mut child).await
+            let program = cmd.get_program().to_string_lossy().into_owned();
+            let mut child = match tokio::process::Command::from(cmd).spawn() {
+                Ok(child) => child,
+                Err(source) => {
+                    return Ok(SuperviseOutcome::incomplete(RunError::Spawn {
+                        program,
+                        source,
+                    }));
+                }
+            };
+            self.supervise(&mut child)
+                .await
+                .map_err(RunnerError::Monitor)
         })
     }
 
@@ -127,11 +148,10 @@ impl ProcessSupervisor {
     ///
     /// # Errors
     ///
-    /// 子进程已被 `wait()` 轮询到完成（`Child::id()` 返回 `None`）时返回 `Err`；
-    /// 确认超限后子进程仍未退出、或回收失败时也返回 `Err`（此时无法保证资源限制，
-    /// 继续评测没有意义）。TLE/MLE 本身经 [`RunStatus`] 返回，不算错误。
-    pub async fn supervise(self, child: &mut Child) -> Result<SuperviseOutcome> {
-        let pid = child.id().context("无法获取进程 PID")?;
+    /// 取不到子进程 PID，或确认超限后无法终止并回收子进程时返回 [`MonitorError`]。
+    /// TLE/MLE 本身经 [`RunStatus`] 返回，不算错误。
+    pub async fn supervise(self, child: &mut Child) -> Result<SuperviseOutcome, MonitorError> {
+        let pid = child.id().ok_or(MonitorError::MissingPid)?;
         let start = Instant::now();
         let peak = AtomicU64::new(0);
         let sampled = AtomicBool::new(false);
@@ -150,7 +170,7 @@ impl ProcessSupervisor {
         };
         let outcome = match finished {
             Finished::Limit(violation) => {
-                kill_and_reap(child).await?;
+                kill_and_reap(child, pid).await?;
                 match violation {
                     Violation::Timeout => {
                         info!("进程超时：{}", elapsed.as_secs_f64());
@@ -163,7 +183,7 @@ impl ProcessSupervisor {
                 }
             }
             Finished::Exit(exit) => {
-                let outcome = classify_exit(exit, elapsed, memory, &self.limits);
+                let outcome = classify_exit(exit, elapsed, memory, &self.limits)?;
                 info!(
                     "进程结束，耗时：{:?}, 峰值内存：{:?}, 状态：{:?}",
                     elapsed, outcome.memory, outcome.status
@@ -178,31 +198,40 @@ impl ProcessSupervisor {
 
 /// 确认超限后终止子进程并回收
 ///
-/// 最多两轮「发送终止信号 + 限时等待退出」，每轮等待上界 [`KILL_RETRY_DELAY`]。发送信号失败
-/// 不等于终止失败（子进程可能已经退出），因此只记下该错误，是否已结束一律由 `wait()` 判定；
-/// 两轮都未结束则返回 `Err`，不做无界等待。
-///
-/// # Errors
-///
-/// 两次等待退出都超时、或等待退出本身失败时返回 `Err`。
-async fn kill_and_reap(child: &mut Child) -> Result<()> {
-    let pid = child.id();
+/// 最多两轮「发送终止信号 + 限时等待退出」，每轮等待上界 [`KILL_RETRY_DELAY`]，不做无界等待。
+/// 发送信号失败不等于终止失败（子进程可能已经退出），是否已结束一律由 `wait()` 判定；
+/// 只有两轮都没能发出信号才报告 [`MonitorError::Kill`]。
+async fn kill_and_reap(child: &mut Child, pid: u32) -> Result<(), MonitorError> {
     let mut kill_error = None;
+    let mut signaled = false;
 
     for _ in 0..2 {
-        kill_error = child.start_kill().err();
+        match child.start_kill() {
+            Ok(()) => signaled = true,
+            Err(error) => kill_error = Some(error),
+        }
 
         // wait 是可取消安全的：超时后进入下一轮，再次发送终止信号
         if let Ok(status) = timeout(KILL_RETRY_DELAY, child.wait()).await {
-            status.with_context(|| format!("回收子进程 {pid:?} 失败"))?;
+            status.map_err(|source| MonitorError::Reap { pid, source })?;
             return Ok(());
         }
     }
 
-    match kill_error {
-        // 两轮都没能发送出终止信号
-        Some(e) => Err(e).with_context(|| format!("终止子进程 {pid:?} 失败")),
-        None => bail!("等待子进程 {pid:?} 退出超时"),
+    Err(classify_kill(signaled, kill_error, pid))
+}
+
+/// 两轮终止尝试失败后的结论
+///
+/// 只要成功发出过一次终止信号，剩下的问题就只是进程未在等待期限内退出；两轮都没
+/// 发出信号才是 [`MonitorError::Kill`]。
+fn classify_kill(signaled: bool, kill_error: Option<io::Error>, pid: u32) -> MonitorError {
+    if signaled {
+        return MonitorError::WaitTimeout { pid };
+    }
+    MonitorError::Kill {
+        pid,
+        source: kill_error.unwrap_or_else(|| io::Error::other("两轮均未能发送终止信号")),
     }
 }
 
@@ -244,38 +273,36 @@ async fn monitor(
     }
 }
 
-/// 归类自行结束的进程：超出时限或内存仍按 TLE/MLE 处理，否则取真实退出状态
+/// 归类自行结束的进程：先确认退出状态，再按超限或退出码归类
 ///
-/// `memory` 是监控采到的峰值内存，`None` 表示始终没采到，此时不构成内存超限证据。
+/// 等待退出失败说明无法确认进程状态，优先按监督失败返回，不能以时间或内存读数
+/// 掩盖它。`memory` 是监控采到的峰值内存，`None` 表示始终没采到，此时不构成内存
+/// 超限证据。
 fn classify_exit(
     exit: io::Result<ExitStatus>,
     elapsed: Duration,
     memory: Option<u64>,
     limits: &ResourceLimits,
-) -> SuperviseOutcome {
+) -> Result<SuperviseOutcome, MonitorError> {
+    let exit = exit.map_err(MonitorError::Wait)?;
+
     if elapsed > limits.time_limit.unwrap_or(Duration::MAX) {
-        return SuperviseOutcome::timeout(elapsed, memory);
+        return Ok(SuperviseOutcome::timeout(elapsed, memory));
     }
     if memory.is_some_and(|memory| memory > limits.memory_limit.unwrap_or(u64::MAX)) {
-        return SuperviseOutcome::out_of_memory(elapsed, memory);
+        return Ok(SuperviseOutcome::out_of_memory(elapsed, memory));
     }
 
-    let status = match exit {
-        Ok(status) if status.success() => RunStatus::Success,
-        Ok(status) => RunStatus::NonZeroExit(status.code().unwrap_or(-1)),
-        Err(e) => {
-            return SuperviseOutcome {
-                status: RunStatus::InternalError(e.into()),
-                time: None,
-                memory: None,
-            };
-        }
+    let status = if exit.success() {
+        RunStatus::Success
+    } else {
+        RunStatus::NonZeroExit(exit.code().unwrap_or(-1))
     };
-    SuperviseOutcome {
+    Ok(SuperviseOutcome {
         status,
         time: Some(elapsed),
         memory,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -284,27 +311,61 @@ mod tests {
     use std::process::{Command, ExitStatus, Stdio};
     use std::time::Duration;
 
-    use super::{ProcessSupervisor, SuperviseOutcome, classify_exit, monitor_runtime};
-    use tuack_lib::utils::compiler::{ResourceLimits, RunStatus};
+    use super::{
+        ProcessSupervisor, SuperviseOutcome, classify_exit, classify_kill, monitor_runtime,
+    };
+    use tuack_lib::utils::compiler::{MonitorError, ResourceLimits, RunError, RunStatus};
+
+    /// 子进程无法启动时返回 `Incomplete(Spawn)`
+    #[test]
+    fn spawn_failure_is_incomplete() {
+        let outcome = ProcessSupervisor::new(limits(Duration::from_secs(1), 1 << 30))
+            .supervise_blocking(Command::new("tuack-ng-no-such-executable"))
+            .expect("启动失败不应是 Err");
+        assert!(matches!(
+            outcome.status,
+            RunStatus::Incomplete(RunError::Spawn { .. })
+        ));
+    }
+
+    /// 至少发出过一次终止信号时，进程未退出报 WaitTimeout 而不是 Kill
+    #[test]
+    fn sent_signal_then_timeout_is_wait_timeout() {
+        let outcome = classify_kill(true, Some(io::Error::other("kill failed")), 7);
+        assert!(matches!(outcome, MonitorError::WaitTimeout { pid: 7 }));
+    }
+
+    /// 两轮都没能发出终止信号才报 Kill
+    #[test]
+    fn no_signal_sent_is_kill() {
+        let outcome = classify_kill(false, Some(io::Error::other("kill failed")), 7);
+        assert!(matches!(outcome, MonitorError::Kill { pid: 7, .. }));
+    }
 
     fn limits(time_limit: Duration, memory_limit: u64) -> ResourceLimits {
         ResourceLimits::new(time_limit, memory_limit)
     }
 
-    /// 占位退出状态：只用于验证在读取退出状态之前就已定论的分类
-    fn unused_exit() -> io::Result<ExitStatus> {
-        Err(io::Error::other("该分支不会读取退出状态"))
+    /// 立即退出的真实退出状态，供分类测试使用
+    fn success_exit() -> io::Result<ExitStatus> {
+        quick_exit_command().status()
+    }
+
+    /// 模拟等待子进程退出失败
+    fn failed_exit() -> io::Result<ExitStatus> {
+        Err(io::Error::other("等待子进程退出失败"))
     }
 
     /// 超出时限后自行退出的进程仍判 TLE
     #[test]
     fn exit_after_time_limit_is_tle() {
         let outcome = classify_exit(
-            unused_exit(),
+            success_exit(),
             Duration::from_secs(2),
             None,
             &limits(Duration::from_secs(1), 1 << 30),
-        );
+        )
+        .expect("分类不应是监督失败");
         assert!(matches!(outcome.status, RunStatus::TimeLimitExceeded));
         // 超时也记录终止时刻，只是它含了 200ms 宽限
         assert_eq!(outcome.time, Some(Duration::from_secs(2)));
@@ -314,11 +375,12 @@ mod tests {
     #[test]
     fn peak_over_limit_is_mle() {
         let outcome = classify_exit(
-            unused_exit(),
+            success_exit(),
             Duration::from_millis(10),
             Some(4096),
             &limits(Duration::from_secs(1), 1024),
-        );
+        )
+        .expect("分类不应是监督失败");
         assert!(matches!(outcome.status, RunStatus::MemoryLimitExceeded));
         assert_eq!(outcome.memory, Some(4096));
         // MLE 的用时是程序实际跑到的时刻，不是「限时 + 宽限」
@@ -336,10 +398,47 @@ mod tests {
             Duration::from_millis(1),
             None,
             &limits(Duration::from_secs(1), 1 << 30),
-        );
+        )
+        .expect("分类不应是监督失败");
         assert!(matches!(outcome.status, RunStatus::Success));
         assert_eq!(outcome.time, Some(Duration::from_millis(1)));
         assert_eq!(outcome.memory, None);
+    }
+
+    /// 等待子进程退出失败属于监督失败，不能当作运行结果
+    #[test]
+    fn wait_failure_is_monitor_error() {
+        let outcome = classify_exit(
+            failed_exit(),
+            Duration::from_millis(1),
+            None,
+            &limits(Duration::from_secs(1), 1 << 30),
+        );
+        assert!(matches!(outcome, Err(MonitorError::Wait(_))));
+    }
+
+    /// 等待失败不能被超时判定掩盖
+    #[test]
+    fn wait_failure_precedes_timeout() {
+        let outcome = classify_exit(
+            failed_exit(),
+            Duration::from_secs(2),
+            None,
+            &limits(Duration::from_secs(1), 1 << 30),
+        );
+        assert!(matches!(outcome, Err(MonitorError::Wait(_))));
+    }
+
+    /// 等待失败不能被内存超限判定掩盖
+    #[test]
+    fn wait_failure_precedes_memory_limit() {
+        let outcome = classify_exit(
+            failed_exit(),
+            Duration::from_millis(10),
+            Some(4096),
+            &limits(Duration::from_secs(1), 1024),
+        );
+        assert!(matches!(outcome, Err(MonitorError::Wait(_))));
     }
 
     /// 非零退出归为 RE 并带上退出码
@@ -353,7 +452,8 @@ mod tests {
             Duration::from_millis(1),
             None,
             &limits(Duration::from_secs(1), 1 << 30),
-        );
+        )
+        .expect("分类不应是监督失败");
         assert!(matches!(outcome.status, RunStatus::NonZeroExit(3)));
     }
 

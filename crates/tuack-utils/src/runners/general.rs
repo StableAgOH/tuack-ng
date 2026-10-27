@@ -2,18 +2,20 @@ use std::process::Command as StdCommand;
 use std::process::Stdio;
 use tempfile::TempDir;
 
+use super::{failed_run, finish_run, inject_input, wire_stdio};
 use crate::command::string_to_command;
 use crate::prelude::*;
 use crate::process::ProcessSupervisor;
 use strfmt::strfmt;
 use tuack_config::lang::Language;
-use tuack_lib::data::Reader;
-use tuack_lib::utils::compiler::{IoMode, RunResult, RunSpec, Runner, RunnerManifest};
+use tuack_lib::utils::compiler::{
+    RunError, RunResult, RunSpec, Runner, RunnerError, RunnerManifest,
+};
 
 /// 通用运行器的 [`Runner`] 实现：按 [`Language`] 配置模板渲染编译与运行命令，再在资源限制
 /// 下执行；无编译器的语言直接拷贝源文件
 pub struct GeneralRunner {
-    tmp_dir: TempDir,
+    tmp_dir: Arc<TempDir>,
     source: PathBuf,
     compile_args: String,
     language: Language,
@@ -34,7 +36,7 @@ impl GeneralRunner {
     ) -> Result<Self> {
         let source = source.into();
         let program_name = program_name.into();
-        let tmp_dir = TempDir::with_prefix("tuack-ng-runner-")?;
+        let tmp_dir = Arc::new(TempDir::with_prefix("tuack-ng-runner-")?);
         let ext = source
             .extension()
             .context("没有后缀名")?
@@ -98,7 +100,8 @@ impl GeneralRunner {
         }
     }
 
-    fn get_run_base_command(&self) -> Result<StdCommand> {
+    /// 运行命令构造失败时返回 [`RunnerError::Command`]
+    fn get_run_base_command(&self) -> Result<StdCommand, RunnerError> {
         if let Some(ref runner) = self.language.runner {
             let run_cmd = strfmt(
                 &runner.run,
@@ -125,17 +128,16 @@ impl GeneralRunner {
                         std::env::consts::EXE_SUFFIX.to_string(),
                     ),
                 ]),
-            )?;
-            Ok(string_to_command(run_cmd.as_str())?)
+            )
+            .map_err(|error| RunnerError::Command(error.to_string()))?;
+            string_to_command(run_cmd.as_str())
+                .map_err(|error| RunnerError::Command(format!("{error:#}")))
         } else {
             let program_path = self.tmp_dir.path().join(format!(
                 "{}{}",
                 self.program_name,
                 std::env::consts::EXE_SUFFIX
             ));
-            if !program_path.exists() {
-                bail!("可执行文件不存在：{}", program_path.display());
-            }
             Ok(StdCommand::new(program_path))
         }
     }
@@ -149,7 +151,7 @@ impl Runner for GeneralRunner {
     /// 语言无编译器配置时只把源文件拷贝为 `{program_name}.{扩展名}`。
     fn prepare(&mut self) -> Result<()> {
         if !self.tmp_dir.path().exists() {
-            fs::create_dir_all(&self.tmp_dir)?;
+            fs::create_dir_all(self.tmp_dir.path())?;
         }
 
         if let Some(mut cmd) = self.get_compile_command()? {
@@ -187,8 +189,8 @@ impl Runner for GeneralRunner {
         unreachable!("通用运行器不支持交互");
     }
 
-    /// 语言未配运行模板时直接执行 `{program_name}`；运行命令模板渲染或解析失败时返回 `Err`。
-    fn execute(&mut self, spec: RunSpec) -> Result<RunResult> {
+    /// 语言未配运行模板时直接执行 `{program_name}`。
+    fn execute(&mut self, spec: RunSpec) -> Result<RunResult, RunnerError> {
         let RunSpec {
             limits,
             io_mode,
@@ -196,62 +198,20 @@ impl Runner for GeneralRunner {
         } = spec;
 
         let mut cmd = self.get_run_base_command()?;
-        cmd.current_dir(&self.tmp_dir);
+        cmd.current_dir(self.tmp_dir.path());
 
-        // IO 模式决定数据读写方式：Stdio 把输入写入文件后接入 stdin、标准输出落文件；
-        // File 由程序自行读写 input_name/output_name，标准流置空
-        match &io_mode {
-            IoMode::Stdio => {
-                let stdin_path = self.tmp_dir.path().join("pipe_stdin");
-                let stdout_path = self.tmp_dir.path().join("pipe_stdout");
-                {
-                    let mut stdin_file = std::fs::File::create(&stdin_path)?;
-                    std::io::copy(&mut input, &mut stdin_file)?;
-                }
-                let stdin_handle = std::fs::File::open(&stdin_path)?;
-                let stdout_handle = std::fs::File::create(&stdout_path)?;
-                cmd.stdin(Stdio::from(stdin_handle));
-                cmd.stdout(Stdio::from(stdout_handle));
-            }
-            IoMode::File { input_name, .. } => {
-                let input_path = self.tmp_dir.path().join(input_name);
-                {
-                    let mut input_file = std::fs::File::create(&input_path)?;
-                    std::io::copy(&mut input, &mut input_file)?;
-                }
-                cmd.stdin(Stdio::null());
-                cmd.stdout(Stdio::null());
-            }
+        if let Err(error) = inject_input(self.tmp_dir.path(), &io_mode, &mut *input) {
+            return Ok(failed_run(RunError::Input(error)));
+        }
+        if let Err(error) = wire_stdio(self.tmp_dir.path(), &io_mode, &mut cmd) {
+            return Ok(failed_run(RunError::Stdio(error)));
         }
 
-        let stderr_path = self.tmp_dir.path().join("pipe_stderr");
-        let stderr_file = std::fs::File::create(&stderr_path)?;
-        cmd.stderr(Stdio::from(stderr_file));
-
         let outcome = ProcessSupervisor::new(limits).supervise_blocking(cmd)?;
-
-        let stderr = std::fs::read(stderr_path)?;
-
-        // 输出流：只有输出文件不存在时视为无输出；权限等其他错误传播
-        let output: Option<Box<dyn Reader>> = {
-            let output_path = match &io_mode {
-                IoMode::Stdio => self.tmp_dir.path().join("pipe_stdout"),
-                IoMode::File { output_name, .. } => self.tmp_dir.path().join(output_name),
-            };
-            if !output_path.exists() {
-                None
-            } else {
-                Some(Box::new(std::fs::File::open(&output_path)?))
-            }
-        };
-
-        Ok(RunResult {
-            status: outcome.status,
-            time: outcome.time,
-            memory: outcome.memory,
-            output,
-            stderr,
-        })
+        match finish_run(outcome, &self.tmp_dir, &io_mode) {
+            Ok(run) => Ok(run),
+            Err(error) => Ok(failed_run(RunError::Output(error))),
+        }
     }
 
     fn cleanup(&mut self) -> Result<()> {

@@ -1,7 +1,34 @@
-use crate::data::{DataMut, DmkItem};
+use std::io::Read;
+
+use crate::data::{DataMut, DmkItem, Reader};
 use crate::prelude::*;
 use crate::utils::compiler::{IoMode, ResourceLimits, RunSpec, RunStatus, Runner};
 use crate::utils::testlib::{Generator, Validator, ValidatorResult};
+
+/// 失败诊断展示的标准错误字符数上限
+const STDERR_EXCERPT_CHARS: usize = 100;
+
+/// 读取标准错误开头的一小段，供失败诊断展示
+fn stderr_excerpt(stderr: Option<&mut dyn Reader>) -> String {
+    let Some(stderr) = stderr else {
+        return String::new();
+    };
+    let mut bytes = Vec::new();
+    // UTF-8 单字符最多 4 字节，多读一个字节用于判断是否截断
+    if stderr
+        .take((STDERR_EXCERPT_CHARS * 4 + 1) as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return String::new();
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let mut excerpt: String = text.chars().take(STDERR_EXCERPT_CHARS).collect();
+    if text.chars().count() > STDERR_EXCERPT_CHARS {
+        excerpt.push_str("...");
+    }
+    excerpt
+}
 
 /// 数据生成会话
 pub struct DmkSession<'a> {
@@ -58,12 +85,12 @@ impl<'a> DmkSession<'a> {
     ///
     /// # Errors
     ///
-    /// 读取输入失败、标程运行失败（进程无法启动、非正常退出或运行器内部错误）、
-    /// 标程未产出输出，或输出写入失败时返回 `Err`。
+    /// 读取输入或写入输出失败、标程未能完成本次运行、非正常退出或未产出输出时
+    /// 返回 `Err`；非正常退出的消息附带标准错误的前 100 个字符。
     pub fn gen_output(&mut self, item: &dyn DataMut) -> Result<()> {
         let input = item.input()?;
 
-        let result = self.runner.execute(RunSpec {
+        let mut result = self.runner.execute(RunSpec {
             limits: ResourceLimits::unlimited(),
             io_mode: self.io_mode.clone(),
             input,
@@ -71,13 +98,17 @@ impl<'a> DmkSession<'a> {
 
         match result.status {
             RunStatus::Success => {}
-            _ if !result.stderr.is_empty() => {
-                bail!(
-                    "标程运行失败\n标准错误输出：{}",
-                    String::from_utf8_lossy(&result.stderr)
-                );
+            RunStatus::Incomplete(error) => bail!("标程运行失败：{error:#}"),
+            RunStatus::NonZeroExit(_)
+            | RunStatus::TimeLimitExceeded
+            | RunStatus::MemoryLimitExceeded => {
+                // TODO: 引入错误类型，将 stderr 句柄传出
+                let stderr = stderr_excerpt(result.stderr.as_deref_mut());
+                if stderr.is_empty() {
+                    bail!("标程运行失败");
+                }
+                bail!("标程运行失败\n标准错误输出：{stderr}");
             }
-            _ => bail!("标程运行失败"),
         }
 
         let output = match result.output {
